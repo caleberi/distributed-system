@@ -1,0 +1,38 @@
+000004 CLNT SØ Started at T:0 LLI:0
+000005 CMIT SØ Nothing left to apply, await (LA:0 = CI:0)
+000006 TIMR SØ Not Leader, checking election timeout
+000005 CLNT S1 Started at T:0 LLI:0
+000007 CLNT S2 Started at T:0 LLI:0
+000007 CMIT S1 Nothing left to apply, await (LA:0 = CI:0)
+Test (2A): initial election
+000007 TIMR S1 Not Leader, checking election timeout
+000007 CMIT S2 Nothing left to apply, await (LA:0 = CI:0)
+000008 TIMR S2 Not Leader, checking election timeout
+000007 TIMR SØ I'm follower, pausing HBT 000008 TIMR S1 I'm follower, pausing HBT
+000008 TIMR S2 I'm follower, pausing HBT
+008222 TIMR SØ Not Leader, checking election timeout
+008227 PERS SØ Saved State T:1 VF:0
+008227 LOG2 SØ Saved Log (-1, 0) [{<nil> 0}]
+008228 TERM SØ Converting to Candidate, calling election T:1
+008228 TIMR SØ Resetting ELT because election
+008231 TERM S1 Term is higher, updating (1 > 0)
+008231 TERM S2 Term is higher, updating (1 > 0)
+008232 PERS S1 Saved State T:1 VF:-1
+008233 LOG2 S1 Saved Log (-1, 0) [{<nil> 0}]
+008232 PERS S2 Saved State T:1 VF:-1
+008233 LOG2 S2 Saved Log (-1, 0) [{<nil> 0}]
+008233 VOTE S1 C0 asking for vote, T1
+008234 VOTE S1 Granting Vote to S0 at T1
+008235 PERS S1 Saved State T:1 VF:0
+008235 LOG2 S1 Saved Log (-1, 0) [{<nil> 0}]
+008234 VOTE S2 CØ asking for vote, T1
+008235 VOTE S2 Granting Vote to SØ at T1
+008236 VOTE SØ <- S1 Got vote
+008236 PERS S2 Saved State T:1 VF:0
+008236 LOG2 S2 Saved Log (-1, 0) [{<nil> 0}]
+008236 LEAD SØ Achieved Majority for T1 (2), converting to Leader
+008237 TIMR SØ Broadcast, reseting HBT
+008238 LOG1 SØ -> S1 Sending PLI: 0 PLT: 0 N: 0 LC: 0 []
+008238 LOG1 SØ -> S2 Sending PLI: 0 PLT: 0 N: 0 LC: 0 []
+008238 TIMR SØ Leader, checking heartbeats
+008240 TIMR S1 Resetting ELT, received AppEnt T1
