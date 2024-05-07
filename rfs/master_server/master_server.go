@@ -57,6 +57,11 @@ type serialChunkInfo struct {
 	Info []common.PersistedChunkInfo
 }
 
+type PesistentMeta struct {
+	Namespace []serializedNsTreeNode
+	ChunkInfo []serialChunkInfo
+}
+
 type MasterServer struct {
 	sync.RWMutex
 	ServerAddr       common.ServerAddr
