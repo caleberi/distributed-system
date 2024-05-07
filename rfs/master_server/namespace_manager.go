@@ -368,15 +368,24 @@ func (nm *namespaceManager) List(p common.Path) ([]common.PathInfo, error) {
 	}
 
 	info := []common.PathInfo{}
-	for name, child := range dir.childrenNodes {
-		info = append(info, common.PathInfo{
-			Path:   string(p),
-			IsDir:  child.isDir,
-			Length: child.length,
-			Chunk:  child.chunks,
-			Name:   name,
-		})
+	queue := utils.Deque[*nsTree]{}
+	queue.PushBack(dir)
+	for queue.Length() > 0 {
+		current := queue.PopFront()
+		for name, child := range current.childrenNodes {
+			if child.isDir && len(child.childrenNodes) != 0 {
+				queue.PushBack(child)
+			}
+			info = append(info, common.PathInfo{
+				Path:   string(child.Path),
+				IsDir:  child.isDir,
+				Length: child.length,
+				Chunk:  child.chunks,
+				Name:   name,
+			})
+		}
 	}
+
 	return info, nil
 }
 
