@@ -56,7 +56,7 @@ func NewClient(addr common.ServerAddr, cacheTickerDuration time.Duration, creden
 }
 
 func (c *Client) Close() {
-	<-c.done
+	c.done <- true
 	close(c.done)
 }
 
