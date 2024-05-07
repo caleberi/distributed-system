@@ -130,3 +130,18 @@ type GetChunkHandleArgs struct {
 	Path  common.Path
 	Index common.ChunkIndex
 }
+
+type GetPathInfoArgs struct {
+	Path common.Path
+}
+
+type GetPathInfoReply struct {
+	Entries []common.PathInfo
+}
+
+type MakeDirectoryArgs struct {
+	Path common.Path
+}
+
+type MakeDirectoryReply struct {
+}
