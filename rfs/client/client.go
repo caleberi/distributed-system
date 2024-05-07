@@ -60,8 +60,6 @@ func (c *Client) Close() {
 	close(c.done)
 }
 
-// GetChunkHandle allows the client to pass a path and index and retrieve a handle
-// if the handle does not exist then create one in the path & namespace
 func (c *Client) GetChunkHandle(path common.Path, idx common.ChunkIndex) (common.ChunkHandle, error) {
 	var reply rpc_struct.GetChunkHandleReply
 	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCGetChunkHandleHandler", rpc_struct.GetChunkHandleArgs{Path: path, Index: idx}, &reply)
@@ -101,4 +99,34 @@ func (c *Client) GetChunkServers(handle common.ChunkHandle) (*common.Lease, erro
 		return nls, nil
 	}
 	return ls, nil
+}
+
+func (c *Client) List(path common.Path) ([]common.PathInfo, error) {
+	var (
+		result []common.PathInfo
+		args   rpc_struct.GetPathInfoArgs
+		reply  rpc_struct.GetPathInfoReply
+	)
+	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCListHandler", args, &reply)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return nil, err
+	}
+
+	result = reply.Entries
+	return result, nil
+}
+
+func (c *Client) MkDir(path common.Path) error {
+	var (
+		args  rpc_struct.MakeDirectoryArgs
+		reply rpc_struct.MakeDirectoryReply
+	)
+	args.Path = path
+	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCMkdirHandler", args, &reply)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return err
+	}
+	return nil
 }
