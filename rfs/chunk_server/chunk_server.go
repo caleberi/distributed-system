@@ -478,7 +478,7 @@ func (cs *ChunkServer) RPCCreateChunkHandler(args rpc_struct.CreateChunkArgs, re
 	}
 
 	cs.chunks[args.Handle] = &chunkInfo{length: 0}
-	filename := fmt.Sprintf("chunk%v.chk", args.Handle)
+	filename := fmt.Sprintf("chunk-%v.chk", args.Handle)
 	err := cs.rootDir.CreateFile(filename)
 	if err != nil {
 		return err
