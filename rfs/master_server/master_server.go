@@ -177,41 +177,6 @@ func NewMasterServer(serverAddress common.ServerAddr, root string) *MasterServer
 }
 
 func (Ma *MasterServer) loadMetadata() error {
-	nmspaceFile, err := Ma.rootDir.GetFile(common.MasterNamespaceMetaDataFileName, os.O_RDONLY, common.FileMode)
-	if err != nil {
-		if _, ok := err.(*os.PathError); ok {
-			err = Ma.rootDir.CreateFile(common.MasterNamespaceMetaDataFileName)
-			if err != nil {
-				return err
-			}
-		}
-		nmspaceFile, err = Ma.rootDir.GetFile(common.MasterNamespaceMetaDataFileName, os.O_RDONLY, common.FileMode)
-		if err != nil {
-			return err
-		}
-	}
-	defer nmspaceFile.Close()
-
-	var serializedNodes []serializedNsTreeNode
-	decoder := gob.NewDecoder(nmspaceFile)
-	err = decoder.Decode(&serializedNodes)
-	if err != nil {
-		if !errors.Is(err, io.EOF) {
-			log.Printf("error occurred while loading metadata (%v)", err)
-			return err
-		}
-	}
-
-	log.Info().Msg(fmt.Sprintf("Server %s found serializedNodes with length %d", Ma.ServerAddr, len(serializedNodes)))
-
-	if len(serializedNodes) != 0 {
-		root := Ma.namespaceManager.Deserialize(serializedNodes)
-
-		if root != nil {
-			Ma.namespaceManager.root = root
-		}
-	}
-
 	file, err := Ma.rootDir.GetFile(common.MasterMetaDataFileName, os.O_RDONLY, common.FileMode)
 	if err != nil {
 		if _, ok := err.(*os.PathError); ok {
@@ -227,9 +192,9 @@ func (Ma *MasterServer) loadMetadata() error {
 	}
 	defer file.Close()
 
-	var chunkInfos []serialChunkInfo
-	decoder = gob.NewDecoder(file)
-	err = decoder.Decode(&chunkInfos)
+	var meta PesistentMeta
+	decoder := gob.NewDecoder(file)
+	err = decoder.Decode(&meta)
 	if err != nil {
 		if !errors.Is(err, io.EOF) {
 			log.Printf("error occurred while loading metadata (%v)", err)
@@ -237,14 +202,26 @@ func (Ma *MasterServer) loadMetadata() error {
 		}
 	}
 
+	if len(meta.Namespace) != 0 {
+		Ma.namespaceManager.Deserialize(meta.Namespace)
+	}
+	if len(meta.ChunkInfo) != 0 {
+		Ma.deserializeChunkInfo(meta.ChunkInfo)
+	}
+	return nil
+}
+
+func (Ma *MasterServer) deserializeChunkInfo(chunkInfos []serialChunkInfo) {
 	Ma.Lock()
 	defer Ma.Unlock()
 
 	for _, chunk := range chunkInfos {
+		log.Info().Msg("MasterServer restore files " + string(chunk.Path))
 		fileInfo := &fileInfo{
 			handles: make([]common.ChunkHandle, 0),
 		}
 		for _, info := range chunk.Info {
+			log.Info().Msg(fmt.Sprintf("MasterServer restore handle %v", info.Handle))
 			fileInfo.handles = append(fileInfo.handles, info.Handle)
 			Ma.chunks[info.Handle] = &chunkInfo{
 				version:  info.Version,
@@ -254,9 +231,8 @@ func (Ma *MasterServer) loadMetadata() error {
 			}
 		}
 		Ma.files[chunk.Path] = fileInfo
+		Ma.numberOfCreatedChunkHandle += common.ChunkHandle(len(fileInfo.handles))
 	}
-
-	return nil
 }
 func (Ma *MasterServer) Shutdown() {
 	if Ma.isDead {
@@ -277,28 +253,6 @@ func (Ma *MasterServer) Shutdown() {
 
 func (Ma *MasterServer) persistMetaData() error {
 
-	nmspaceFile, err := Ma.rootDir.GetFile(common.MasterNamespaceMetaDataFileName, os.O_RDWR, common.FileMode)
-	if err != nil {
-		if _, ok := err.(*os.PathError); ok {
-			err = Ma.rootDir.CreateFile(common.MasterNamespaceMetaDataFileName)
-			if err != nil {
-				return err
-			}
-		}
-		nmspaceFile, err = Ma.rootDir.GetFile(common.MasterMetaDataFileName, os.O_RDWR, common.FileMode)
-		if err != nil {
-			return err
-		}
-	}
-	defer nmspaceFile.Close()
-
-	serizalizedData := Ma.namespaceManager.Serialize()
-	encoder := gob.NewEncoder(nmspaceFile)
-	err = encoder.Encode(&serizalizedData)
-	if err != nil {
-		log.Err(err).Stack().Send()
-		return err
-	}
 	file, err := Ma.rootDir.GetFile(common.MasterMetaDataFileName, os.O_RDWR, common.FileMode)
 	if err != nil {
 		if _, ok := err.(*os.PathError); ok {
@@ -313,9 +267,12 @@ func (Ma *MasterServer) persistMetaData() error {
 		}
 	}
 	defer file.Close()
-	serizalizedChunks := Ma.serializeChunks()
-	encoder = gob.NewEncoder(file)
-	return encoder.Encode(&serizalizedChunks)
+
+	var meta PesistentMeta
+	meta.Namespace = Ma.namespaceManager.Serialize()
+	meta.ChunkInfo = Ma.serializeChunks()
+	encoder := gob.NewEncoder(file)
+	return encoder.Encode(&meta)
 }
 
 // when the client request the location chunk server to
@@ -392,7 +349,7 @@ func (Ma *MasterServer) createChunk(path common.Path, addrs []common.ServerAddr)
 	file.handles = append(file.handles, currentHandle) // record the new chunkhandle for this path
 
 	// create a chunk and update the record on master
-	chk := &chunkInfo{path: path}
+	chk := &chunkInfo{path: path, expire: time.Now().Add(leaseTimeout)}
 	Ma.chunks[currentHandle] = chk // record the chunk on the master for later persistence
 
 	errs := []string{}
@@ -959,4 +916,23 @@ func (csm *MasterServer) RPCGetChunkHandleHandler(args rpc_struct.GetChunkHandle
 	}
 
 	return err
+}
+
+func (Ma *MasterServer) RPCListHandler(args rpc_struct.GetPathInfoArgs, reply *rpc_struct.GetPathInfoReply) error {
+	entries, err := Ma.namespaceManager.List(args.Path)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return err
+	}
+	reply.Entries = entries
+	return nil
+}
+
+func (Ma *MasterServer) RPCMkdirHandler(args rpc_struct.MakeDirectoryArgs, reply rpc_struct.MakeDirectoryReply) error {
+	err := Ma.namespaceManager.MkDirAll(args.Path)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return err
+	}
+	return nil
 }
