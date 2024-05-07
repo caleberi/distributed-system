@@ -133,7 +133,8 @@ func (nm *namespaceManager) SliceToNsTree(r []serializedNsTreeNode, id int) *nsT
 func (nm *namespaceManager) Deserialize(nodes []serializedNsTreeNode) *nsTree {
 	nm.root.RLock()
 	defer nm.root.RUnlock()
-	return nm.SliceToNsTree(nodes, len(nodes)-1)
+	nm.root = nm.SliceToNsTree(nodes, len(nodes)-1)
+	return nm.root
 }
 
 // Serialize helps to create a storable tstree data structure on disk with gob
