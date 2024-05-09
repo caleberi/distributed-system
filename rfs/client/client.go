@@ -128,3 +128,65 @@ func (c *Client) MkDir(path common.Path) error {
 	}
 	return nil
 }
+
+func (c *Client) CreateFile(path common.Path) error {
+	var (
+		args  rpc_struct.CreateFileArgs
+		reply rpc_struct.CreateFileReply
+	)
+	args.Path = path
+	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCCreateFileHandler", args, &reply)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return err
+	}
+	return nil
+}
+
+func (c *Client) DeleteFile(path common.Path) error {
+	var (
+		args  rpc_struct.DeleteFileArgs
+		reply rpc_struct.DeleteFileReply
+	)
+	args.Path = path
+	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCDeleteFileHandler", args, &reply)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return err
+	}
+	return nil
+}
+
+func (c *Client) RenameFile(source, target common.Path) error {
+	var (
+		args  rpc_struct.RenameFileArgs
+		reply rpc_struct.RenameFileReply
+	)
+	args.Source = source
+	args.Target = target
+	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCRenameHandler", args, &reply)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return err
+	}
+	return nil
+}
+
+func (c *Client) GetFile(path common.Path) (*common.FileInfo, error) {
+	var (
+		args  rpc_struct.GetFileInfoArgs
+		reply rpc_struct.GetFileInfoReply
+	)
+	args.Path = path
+	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCGetFileInfoHandler", args, &reply)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return nil, err
+	}
+
+	var fileInfo common.FileInfo
+	fileInfo.Chunks = reply.Chunks
+	fileInfo.IsDir = reply.IsDir
+	fileInfo.Length = reply.Length
+	return &fileInfo, err
+}
