@@ -143,5 +143,39 @@ type MakeDirectoryArgs struct {
 	Path common.Path
 }
 
-type MakeDirectoryReply struct {
+type MakeDirectoryReply struct{}
+
+type RenameFileArgs struct {
+	Source common.Path
+	Target common.Path
+}
+
+type RenameFileReply struct{}
+
+type CreateFileArgs struct {
+	Path common.Path
+}
+type CreateFileReply struct{}
+
+type DeleteFileArgs struct {
+	Path common.Path
+}
+
+type DeleteFileReply struct{}
+
+type GetFileInfoArgs struct {
+	Path common.Path
+}
+
+type GetFileInfoReply struct {
+	IsDir  bool
+	Length int64
+	Chunks int64
+}
+
+type RetrieveReplicasArgs struct {
+	Handle common.ChunkHandle
+}
+type RetrieveReplicasReply struct {
+	Locations []common.ServerAddr
 }
