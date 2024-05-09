@@ -10,27 +10,19 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type Credentials struct {
-	Username string
-	Password string
-}
-
 type Client struct {
 	masterServer common.ServerAddr
-	credentials  Credentials
-
-	mu                 sync.RWMutex
-	chunkToServerCache map[common.ChunkHandle]*common.Lease
-	done               chan bool
+	mu           sync.RWMutex
+	leaseCache   map[common.ChunkHandle]*common.Lease
+	done         chan bool
 }
 
-func NewClient(addr common.ServerAddr, cacheTickerDuration time.Duration, credentials Credentials) *Client {
+func NewClient(addr common.ServerAddr, cacheTickerDuration time.Duration) *Client {
 	cl := &Client{
-		masterServer:       addr,
-		credentials:        credentials,
-		mu:                 sync.RWMutex{},
-		chunkToServerCache: make(map[common.ChunkHandle]*common.Lease),
-		done:               make(chan bool, 1),
+		masterServer: addr,
+		mu:           sync.RWMutex{},
+		leaseCache:   make(map[common.ChunkHandle]*common.Lease),
+		done:         make(chan bool, 1),
 	}
 
 	go func() {
@@ -39,9 +31,9 @@ func NewClient(addr common.ServerAddr, cacheTickerDuration time.Duration, creden
 			select {
 			case <-tick.C:
 				cl.mu.Lock()
-				for _, item := range cl.chunkToServerCache {
+				for _, item := range cl.leaseCache {
 					if item.Expire.Before(time.Now()) {
-						delete(cl.chunkToServerCache, item.Handle)
+						delete(cl.leaseCache, item.Handle)
 					}
 				}
 				cl.mu.Unlock()
@@ -78,7 +70,7 @@ func (c *Client) GetChunkHandle(path common.Path, offset common.ChunkIndex) (com
 
 func (c *Client) GetChunkServers(handle common.ChunkHandle) (*common.Lease, error) {
 	c.mu.RLock()
-	ls, ok := c.chunkToServerCache[handle]
+	ls, ok := c.leaseCache[handle]
 	c.mu.RUnlock()
 
 	if !ok {
@@ -99,7 +91,7 @@ func (c *Client) GetChunkServers(handle common.ChunkHandle) (*common.Lease, erro
 			Secondaries: info.SecondaryServers,
 		}
 		c.mu.Lock()
-		c.chunkToServerCache[handle] = nls
+		c.leaseCache[handle] = nls
 		c.mu.Unlock()
 
 		return nls, nil
