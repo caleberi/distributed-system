@@ -61,3 +61,9 @@ type Memory struct {
 	Sys        uint64
 	NumGC      uint64
 }
+
+type FileInfo struct {
+	IsDir  bool
+	Length int64
+	Chunks int64
+}
