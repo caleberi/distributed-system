@@ -60,9 +60,15 @@ func (c *Client) Close() {
 	close(c.done)
 }
 
-func (c *Client) GetChunkHandle(path common.Path, idx common.ChunkIndex) (common.ChunkHandle, error) {
+func (c *Client) GetChunkHandle(path common.Path, offset common.ChunkIndex) (common.ChunkHandle, error) {
 	var reply rpc_struct.GetChunkHandleReply
-	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCGetChunkHandleHandler", rpc_struct.GetChunkHandleArgs{Path: path, Index: idx}, &reply)
+	err := utils.CallRPCServer(
+		string(c.masterServer),
+		"MasterServer.RPCGetChunkHandleHandler",
+		rpc_struct.GetChunkHandleArgs{
+			Path:  path,
+			Index: offset,
+		}, &reply)
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return -1, err
