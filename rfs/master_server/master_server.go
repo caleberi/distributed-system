@@ -23,11 +23,6 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const (
-	// lease expiration time
-	leaseTimeout = 1 * time.Second
-)
-
 type chunkServerInfo struct {
 	// last contact time
 	lastHeatBeat time.Time
@@ -154,12 +149,15 @@ func NewMasterServer(serverAddress common.ServerAddr, root string) *MasterServer
 	// garbage collection, stale replica removal & detection
 	go func() {
 		persistMetadataCheck := time.NewTicker(common.MasterPersistMetaInterval)
-
+		serverHealthCheck := time.NewTicker(common.ServerHealthCheckInterval)
 		for {
 			var branchInfo common.BranchInfo
 			select {
 			case <-ma.shutdownChan:
 				return
+			case <-serverHealthCheck.C:
+				branchInfo.Event = string(common.MasterHeartBeat)
+				branchInfo.Err = ma.serverHeartBeat()
 			case <-persistMetadataCheck.C:
 				branchInfo.Event = string(common.PersistMetaData)
 				branchInfo.Err = ma.persistMetaData()
@@ -174,6 +172,70 @@ func NewMasterServer(serverAddress common.ServerAddr, root string) *MasterServer
 
 	log.Info().Msg(fmt.Sprintf("Master is running now. Address = [%s] ", string(ma.ServerAddr)))
 	return ma
+}
+
+func (Ma *MasterServer) serverHeartBeat() error {
+
+	deadServers := Ma.DetectDeadServer()
+	for _, addr := range deadServers {
+		log.Info().Msg(fmt.Sprintf(">> Removing Server %v from Master's servers list", addr))
+		handles, err := Ma.RemoveServer(addr)
+		if err != nil {
+			return err
+		}
+		err = Ma.RemoveChunks(handles, addr)
+		if err != nil {
+			return err
+		}
+	}
+
+	handles := Ma.GetReplicationNeedList()
+
+	log.Info().Msg(fmt.Sprintf("MasterServer : Replication needed for handles - %v", handles))
+	Ma.RLock()
+	for i := 0; i < len(handles); i++ {
+		ck := Ma.chunks[handles[i]]
+
+		if ck.expire.Before(time.Now()) {
+			ck.Lock() // don't grant lease during copy
+			err := Ma.performReplication(handles[i])
+			if err != nil {
+				log.Err(err).Stack().Msg(err.Error())
+				ck.Unlock()
+				continue
+			}
+			ck.Unlock()
+		}
+	}
+	Ma.RUnlock()
+
+	return nil
+}
+
+func (Ma *MasterServer) performReplication(handle common.ChunkHandle) error {
+	from, to, err := Ma.chooseReplicationServer(handle)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return err
+	}
+
+	log.Warn().Msg(fmt.Sprintf("allocate new chunk %v from %v to %v", handle, from, to))
+
+	var cr rpc_struct.CreateChunkReply
+	err = utils.CallRPCServer(string(to), "ChunkServer.RPCCreateChunkHandler", rpc_struct.CreateChunkArgs{Handle: handle}, &cr)
+	if err != nil {
+		return err
+	}
+
+	var sr rpc_struct.GetSnapshotReply
+	err = utils.CallRPCServer(string(from), "ChunkServer.RPCGetSnapshotHandler", rpc_struct.GetSnapshotArgs{Handle: handle, Replicas: to}, &sr)
+	if err != nil {
+		return err
+	}
+
+	Ma.RegisterReplicas(handle, to, false)
+	Ma.addChunk([]common.ServerAddr{to}, handle)
+	return nil
 }
 
 func (Ma *MasterServer) loadMetadata() error {
@@ -206,12 +268,12 @@ func (Ma *MasterServer) loadMetadata() error {
 		Ma.namespaceManager.Deserialize(meta.Namespace)
 	}
 	if len(meta.ChunkInfo) != 0 {
-		Ma.deserializeChunkInfo(meta.ChunkInfo)
+		Ma.deserializeChunks(meta.ChunkInfo)
 	}
 	return nil
 }
 
-func (Ma *MasterServer) deserializeChunkInfo(chunkInfos []serialChunkInfo) {
+func (Ma *MasterServer) deserializeChunks(chunkInfos []serialChunkInfo) {
 	Ma.Lock()
 	defer Ma.Unlock()
 
@@ -280,7 +342,7 @@ func (Ma *MasterServer) persistMetaData() error {
 //	figure out where to write to. we need to retireve the location of the  server  from the chunk
 //
 // likewise also need to register it to before that too
-func (Ma *MasterServer) GetReplica(handle common.ChunkHandle) ([]common.ServerAddr, error) {
+func (Ma *MasterServer) GetReplicas(handle common.ChunkHandle) ([]common.ServerAddr, error) {
 	Ma.RLock()
 	chunkInfo, ok := Ma.chunks[handle]
 	Ma.RUnlock()
@@ -302,27 +364,28 @@ func (Ma *MasterServer) RegisterReplicas(handle common.ChunkHandle, addr common.
 		Ma.RLock()
 		chunkInfo, ok = Ma.chunks[handle]
 		Ma.RUnlock()
+
+		Ma.Lock()
+		defer Ma.Unlock()
 	} else {
 		chunkInfo, ok = Ma.chunks[handle]
 	}
 
-	if ok {
-		return fmt.Errorf("cannot register the same server address again since it already registered")
+	if !ok {
+		return fmt.Errorf("cannot find chunk %v", handle)
 	}
 
-	Ma.Lock()
 	chunkInfo.locations = append(chunkInfo.locations, addr)
-	Ma.Unlock()
 	return nil
 }
 
-func (Ma *MasterServer) GetChunkHandle(filePath common.Path, idx common.ChunkIndex) (common.ChunkHandle, error) {
+func (Ma *MasterServer) getChunkHandle(filePath common.Path, idx common.ChunkIndex) (common.ChunkHandle, error) {
 	Ma.RLock()
 	defer Ma.RUnlock()
 
 	fileInfo, ok := Ma.files[filePath]
 	if !ok {
-		return -1, fmt.Errorf("cannot get handle for path =>%v[%v]", filePath, idx)
+		return -1, fmt.Errorf("cannot get handle for path => %v-%v", filePath, idx)
 	}
 
 	if idx < 0 || int(idx) >= len(fileInfo.handles) {
@@ -349,7 +412,10 @@ func (Ma *MasterServer) createChunk(path common.Path, addrs []common.ServerAddr)
 	file.handles = append(file.handles, currentHandle) // record the new chunkhandle for this path
 
 	// create a chunk and update the record on master
-	chk := &chunkInfo{path: path, expire: time.Now().Add(leaseTimeout)}
+	chk := &chunkInfo{
+		path:   path,
+		expire: time.Now().Add(common.LeaseTimeout),
+	}
 	Ma.chunks[currentHandle] = chk // record the chunk on the master for later persistence
 
 	errs := []string{}
@@ -359,22 +425,21 @@ func (Ma *MasterServer) createChunk(path common.Path, addrs []common.ServerAddr)
 
 	utils.ForEach(addrs, func(addr common.ServerAddr) {
 		var reply rpc_struct.CreateChunkReply
-
 		err := utils.CallRPCServer(string(addr), "ChunkServer.RPCCreateChunkHandler", args, &reply)
-
 		if err != nil {
 			errs = append(errs, err.Error())
-			return
+		} else {
+			// update this particular chunk information before handing it o
+			chk.locations = append(chk.locations, addr)
+			success = append(success, string(addr))
 		}
-
-		// update this particular chunk information before handing it o
-		chk.locations = append(chk.locations, addr)
-		success = append(success, string(addr))
 	})
 
 	servers := utils.Map(success, func(v string) common.ServerAddr { return common.ServerAddr(v) })
 	errStr := strings.Join(errs, ";")
 
+	// if err occurred during creation of chunk then
+	// we register chunk for chunk for re-migration
 	if len(errs) != 0 {
 		Ma.replicaMigrationList = append(Ma.replicaMigrationList, currentHandle)
 		return currentHandle, servers, fmt.Errorf(errStr)
@@ -437,13 +502,9 @@ func (Ma *MasterServer) GetReplicationNeedList() []common.ChunkHandle {
 	sort.Ints(newReplicationNeedList)
 	Ma.replicaMigrationList = make([]common.ChunkHandle, 0)
 	for i, v := range newReplicationNeedList {
-		if i == 0 || v != newReplicationNeedList[i-1] {
+		if i == 0 || v != newReplicationNeedList[i-1] { // avoid duplicate
 			Ma.replicaMigrationList = append(Ma.replicaMigrationList, common.ChunkHandle(v))
 		}
-	}
-
-	if len(Ma.replicaMigrationList) == 0 {
-		return nil
 	}
 
 	return Ma.replicaMigrationList
@@ -462,7 +523,7 @@ func (Ma *MasterServer) ExtendLease(handle common.ChunkHandle, primary common.Se
 		return nil, fmt.Errorf("%v does not hold lease for %v ", primary, handle)
 	}
 
-	chk.expire = chk.expire.Add(leaseTimeout)
+	chk.expire = chk.expire.Add(common.LeaseTimeout)
 	return chk, nil
 
 }
@@ -525,7 +586,7 @@ func (Ma *MasterServer) GetLeaseHolder(handle common.ChunkHandle) (*common.Lease
 
 		if len(chk.locations) < common.MinimumReplicationFactor {
 			Ma.Lock()
-			Ma.replicaMigrationList = append(Ma.replicaMigrationList, handle)
+			Ma.replicaMigrationList = append(Ma.replicaMigrationList, handle) // migrate the chunk
 			Ma.Unlock()
 
 			if len(chk.locations) == 0 {
@@ -535,7 +596,7 @@ func (Ma *MasterServer) GetLeaseHolder(handle common.ChunkHandle) (*common.Lease
 		}
 
 		chk.primary = chk.locations[0]
-		chk.expire = chk.expire.Add(leaseTimeout)
+		chk.expire = chk.expire.Add(common.LeaseTimeout)
 	}
 
 	lease.Primary = chk.primary
@@ -564,42 +625,19 @@ func (Ma *MasterServer) serializeChunks() []serialChunkInfo {
 	return ret
 }
 
-func (Ma *MasterServer) deserializeChunks(files []serialChunkInfo) []common.PersistedChunkInfo {
-	Ma.RLock()
-	defer Ma.RUnlock()
-
-	now := time.Now()
-	for _, v := range files {
-		log.Info().Msg(fmt.Sprint("Master restore files ", v.Path))
-		f := new(fileInfo)
-		for _, ck := range v.Info {
-			f.handles = append(f.handles, ck.Handle)
-			log.Info().Msg(fmt.Sprint("Master restore files ", ck.Handle))
-			Ma.chunks[ck.Handle] = &chunkInfo{
-				expire:   now,
-				version:  ck.Version,
-				checksum: ck.Checksum,
-			}
-		}
-		Ma.numberOfCreatedChunkHandle += common.ChunkHandle(len(v.Info))
-		Ma.files[v.Path] = f
-	}
-
-	return nil
-}
-
 func (Ma *MasterServer) DetectDeadServer() []common.ServerAddr {
 	Ma.Lock()
 	defer Ma.Unlock()
 
 	var ret []common.ServerAddr
 	for serverAddr, chk := range Ma.servers {
-		if chk.lastHeatBeat.Add(common.ServerHealthCheckTimeout).Before(time.Now()) {
+		if time.Now().After(chk.lastHeatBeat.Add(common.ServerHealthCheckTimeout)) {
 			// no heartbeat happend since 30sec after our last hearbeat
 			ret = append(ret, serverAddr)
 		}
 	}
 
+	log.Info().Msg(fmt.Sprintf("[]===== DEAD SERVERS =====[] [%v]", ret))
 	return ret
 }
 
@@ -684,22 +722,24 @@ func (Ma *MasterServer) chooseServers(num int) ([]common.ServerAddr, error) {
 		rrtl float64
 	}
 
+	Ma.Lock()
+	defer Ma.Unlock()
+
 	if num > len(Ma.servers) {
 		return nil, fmt.Errorf("no enough servers for %v replicas", num)
 	}
+
 	var (
 		intermediateArr []addrToRRTL
 		ret             []common.ServerAddr
 	)
 
-	Ma.RLock()
 	for a, server := range Ma.servers {
 		intermediateArr = append(intermediateArr, addrToRRTL{
 			addr: a,
 			rrtl: server.serverInfo.RoundTripProximityTime,
 		})
 	}
-	Ma.RUnlock()
 
 	slices.SortFunc(intermediateArr, func(a, b addrToRRTL) int {
 		if a.rrtl < b.rrtl {
@@ -719,6 +759,7 @@ func (Ma *MasterServer) chooseServers(num int) ([]common.ServerAddr, error) {
 		ret = append(ret, all[v])
 	}
 
+	log.Info().Msg(fmt.Sprintf("Chose servers %v for replication", ret))
 	return ret, nil
 }
 
@@ -782,7 +823,7 @@ func (csm *MasterServer) RPCHeartBeatHandler(args rpc_struct.HeartBeatArg, reply
 			lease.Secondaries = lease.Secondaries[1:]
 			lease.Secondaries = append(lease.Secondaries, currentPrimary)
 			newLeases = append(newLeases, &common.Lease{
-				Expire:      lease.Expire.Add(leaseTimeout),
+				Expire:      lease.Expire.Add(common.LeaseTimeout),
 				Handle:      lease.Handle,
 				InUse:       false,
 				Primary:     newPrimary,
@@ -877,14 +918,17 @@ func (csm *MasterServer) RPCGetPrimaryAndSecondaryServersInfoHandler(
 }
 
 func (csm *MasterServer) RPCGetChunkHandleHandler(args rpc_struct.GetChunkHandleArgs, reply *rpc_struct.GetChunkHandleReply) error {
-	err := csm.namespaceManager.MkDirAll(args.Path)
+	dirpath, filename := csm.namespaceManager.retrievePartitionFromPath(args.Path)
+	_, err := utils.ValidateFilenameStr(filename, args.Path)
+	if err != nil {
+		return err
+	}
+	err = csm.namespaceManager.MkDirAll(common.Path(dirpath))
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return err
 	}
-	pds := strings.Split(string(args.Path), "/")
-	fp := args.Path + "/" + common.Path(pds[len(pds)-1])
-	err = csm.namespaceManager.Create(fp)
+	err = csm.namespaceManager.Create(args.Path)
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return err
@@ -903,13 +947,13 @@ func (csm *MasterServer) RPCGetChunkHandleHandler(args rpc_struct.GetChunkHandle
 		if err != nil {
 			return err
 		}
-		reply.Handle, addrs, err = csm.createChunk(fp, addrs)
+		reply.Handle, addrs, err = csm.createChunk(args.Path, addrs)
 		if err != nil {
 			return err
 		}
 		csm.addChunk(addrs, reply.Handle)
 	} else {
-		reply.Handle, err = csm.GetChunkHandle(args.Path, args.Index)
+		reply.Handle, err = csm.getChunkHandle(args.Path, args.Index)
 		if err != nil {
 			return err
 		}
@@ -928,11 +972,62 @@ func (Ma *MasterServer) RPCListHandler(args rpc_struct.GetPathInfoArgs, reply *r
 	return nil
 }
 
-func (Ma *MasterServer) RPCMkdirHandler(args rpc_struct.MakeDirectoryArgs, reply rpc_struct.MakeDirectoryReply) error {
+func (Ma *MasterServer) RPCMkdirHandler(args rpc_struct.MakeDirectoryArgs, reply *rpc_struct.MakeDirectoryReply) error {
 	err := Ma.namespaceManager.MkDirAll(args.Path)
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return err
 	}
+	return nil
+}
+
+func (Ma *MasterServer) RPCRenameHandler(args rpc_struct.RenameFileArgs, reply *rpc_struct.RenameFileReply) error {
+	err := Ma.namespaceManager.Rename(args.Source, args.Target)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return err
+	}
+	return nil
+}
+
+func (Ma *MasterServer) RPCCreateFileHandler(args rpc_struct.CreateFileArgs, reply *rpc_struct.CreateFileReply) error {
+	err := Ma.namespaceManager.Create(args.Path)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return err
+	}
+	return nil
+}
+
+func (Ma *MasterServer) RPCDeleteFileHandler(args rpc_struct.DeleteFileArgs, reply *rpc_struct.DeleteFileReply) error {
+	err := Ma.namespaceManager.Delete(args.Path)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return err
+	}
+	return nil
+}
+
+func (Ma *MasterServer) RPCGetFileInfoHandler(args rpc_struct.GetFileInfoArgs, reply *rpc_struct.GetFileInfoReply) error {
+	file, err := Ma.namespaceManager.Get(args.Path)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return err
+	}
+
+	file.Lock()
+	defer file.Unlock()
+	reply.Chunks = file.chunks
+	reply.IsDir = file.isDir
+	reply.Length = file.length
+	return nil
+}
+
+func (Ma *MasterServer) RPCGetReplicasHandler(args rpc_struct.RetrieveReplicasArgs, reply *rpc_struct.RetrieveReplicasReply) error {
+	servers, err := Ma.GetReplicas(args.Handle)
+	if err != nil {
+		return err
+	}
+	utils.ForEach(servers, func(v common.ServerAddr) { reply.Locations = append(reply.Locations, v) })
 	return nil
 }

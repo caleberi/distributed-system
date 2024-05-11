@@ -21,7 +21,8 @@ const (
 	PersistMetaDataInterval   time.Duration = 10 * time.Hour
 	ChunkMetaDataFileName                   = "chunk.server.meta"
 	ChunkMaxSizeInMb                        = 64
-	ChunkMaxSizeInByte                      = 64 * 1024 * 1024
+	ChunkMaxSizeInByte                      = 64 << 20 // 1024 * 1024 * 64
+	AppendMaxSizeInByte                     = ChunkMaxSizeInByte / 4
 
 	// downloadbuffer
 	DownloadBufferItemExpire = 1 * time.Minute
@@ -35,6 +36,8 @@ const (
 
 	// replicationFactor
 	MinimumReplicationFactor = 3
+
+	LeaseTimeout = 1 * time.Second
 
 	// file constant
 	FileMode = 0755
