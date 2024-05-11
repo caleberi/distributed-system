@@ -33,7 +33,8 @@ type CheckChunkVersionReply struct {
 
 type ReadChunkArgs struct {
 	Offset common.Offset
-	Length uint64
+	Data   []byte
+	Length int64
 	Handle common.ChunkHandle
 	Lease  *common.Lease
 }
