@@ -320,17 +320,17 @@ func (nm *namespaceManager) MkDirAll(p common.Path) error {
 }
 
 func (nm *namespaceManager) Get(p common.Path) (*nsTree, error) {
-	dirpath, dirname := nm.retrievePartitionFromPath(p)
-	parents, cwd, err := nm.lockParents(p, false)
+	dirpath, filenameOrDirname := nm.retrievePartitionFromPath(p)
+	parents, cwd, err := nm.lockParents(common.Path(dirpath), false)
 	defer nm.unlockParents(parents, false)
 	if err != nil {
 		return nil, err
 	}
 
-	if dir, ok := cwd.childrenNodes[dirname]; ok {
+	if dir, ok := cwd.childrenNodes[filenameOrDirname]; ok {
 		return dir, nil
 	}
-	return nil, fmt.Errorf("node with path %s does not exist", dirpath)
+	return nil, fmt.Errorf("node with path %s does not exist for %s", dirpath, filenameOrDirname)
 }
 
 func (nm *namespaceManager) Rename(source, target common.Path) error {
@@ -358,6 +358,7 @@ func (nm *namespaceManager) Rename(source, target common.Path) error {
 	node := cwd.childrenNodes[srcDirnameOrFilename]
 	delete(cwd.childrenNodes, srcDirnameOrFilename)
 	cwd.childrenNodes[targetDirnameOrFilename] = node
+	node.Path = target
 	return nil
 }
 
