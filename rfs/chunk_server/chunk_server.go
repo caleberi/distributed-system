@@ -443,7 +443,7 @@ func (cs *ChunkServer) RPCCheckChunkVersionHandler(args rpc_struct.CheckChunkVer
 	return nil
 }
 
-func (cs *ChunkServer) RPCReadChunk(args rpc_struct.ReadChunkArgs, reply *rpc_struct.ReadChunkReply) error {
+func (cs *ChunkServer) RPCReadChunkHandler(args rpc_struct.ReadChunkArgs, reply *rpc_struct.ReadChunkReply) error {
 	handle := args.Handle
 	cs.mu.RLock()
 	chInfo, ok := cs.chunks[args.Handle]
@@ -623,7 +623,7 @@ time_extension:
 	}
 }
 
-func (cs *ChunkServer) ApplyMutationHandler(args rpc_struct.ApplyMutationArgs, reply *rpc_struct.ApplyMutationReply) error {
+func (cs *ChunkServer) RPCApplyMutationHandler(args rpc_struct.ApplyMutationArgs, reply *rpc_struct.ApplyMutationReply) error {
 
 	data, ok := cs.downloadBuffer.Get(args.DownloadBufferId)
 	if !ok {
@@ -659,7 +659,7 @@ func (cs *ChunkServer) ApplyMutationHandler(args rpc_struct.ApplyMutationArgs, r
 	return nil
 }
 
-func (cs *ChunkServer) ApplyAppendChunkHandler(args rpc_struct.AppendChunkArgs, reply *rpc_struct.AppendChunkReply) error {
+func (cs *ChunkServer) RPCAppendChunkHandler(args rpc_struct.AppendChunkArgs, reply *rpc_struct.AppendChunkReply) error {
 	data, ok := cs.downloadBuffer.Get(args.DownloadBufferId)
 	if !ok {
 		reply.ErrorCode = common.DownloadBufferMiss
