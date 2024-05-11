@@ -123,7 +123,13 @@ func (nm *namespaceManager) SliceToNsTree(r []serializedNsTreeNode, id int) *nsT
 		}
 		parent := nm.SliceToNsTree(r, nextId)
 		if parent != nil {
-			parent.childrenNodes[string(r[id].Path)] = n
+			if parent.childrenNodes != nil {
+				parent.childrenNodes[string(r[id].Path)] = n
+			} else {
+				parent.childrenNodes = make(map[string]*nsTree)
+				parent.childrenNodes[string(r[id].Path)] = n
+			}
+
 		}
 	}
 	nm.deserializationCount++
