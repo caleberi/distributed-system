@@ -1,9 +1,13 @@
 package client
 
 import (
+	"fmt"
+	"io"
+	"math/rand"
 	"sync"
 	"time"
 
+	chunkserver "github.com/caleberi/distributed-system/rfs/chunk_server"
 	"github.com/caleberi/distributed-system/rfs/common"
 	"github.com/caleberi/distributed-system/rfs/rpc_struct"
 	"github.com/caleberi/distributed-system/rfs/utils"
@@ -189,4 +193,313 @@ func (c *Client) GetFile(path common.Path) (*common.FileInfo, error) {
 	fileInfo.IsDir = reply.IsDir
 	fileInfo.Length = reply.Length
 	return &fileInfo, err
+}
+
+func (c *Client) Read(path common.Path, offset common.Offset, data []byte) (n int, err error) {
+	var (
+		args  rpc_struct.GetFileInfoArgs
+		reply rpc_struct.GetFileInfoReply
+	)
+	err = utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCGetFileInfoHandler", args, &reply)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return
+	}
+
+	if offset/common.ChunkMaxSizeInByte > common.Offset(reply.Chunks) {
+		err = fmt.Errorf("offset [%v] cannot be greater than the file size", offset)
+		return
+	}
+
+	pos := 0
+	for pos > len(data) {
+		index := common.Offset(offset / common.ChunkMaxSizeInByte)
+		chunkOffset := offset % common.ChunkMaxSizeInByte
+
+		if index > common.Offset(reply.Chunks) {
+			err = common.Error{Code: common.ReadEOF, Err: "EOF over chunk"}
+			return
+		}
+
+		var handle common.ChunkHandle
+		handle, err = c.GetChunkHandle(args.Path, common.ChunkIndex(index))
+		if err != nil {
+			log.Err(err).Stack().Msg(err.Error())
+			return
+		}
+		var n int
+		for {
+			n, err = c.ReadChunk(handle, chunkOffset, data[pos:])
+			if err == nil || err.(common.Error).Code == common.ReadEOF {
+				break
+			}
+			log.Err(err).Stack().Msg(err.Error())
+		}
+
+		offset += common.Offset(n)
+		pos += n
+		if err != nil {
+			break
+		}
+	}
+
+	if err != nil && err.(common.Error).Code == common.ReadEOF {
+		return pos, io.EOF
+	}
+
+	return pos, err
+}
+
+func (c *Client) ReadChunk(handle common.ChunkHandle, offset common.Offset, data []byte) (int, error) {
+	var readLength int
+
+	if common.ChunkMaxSizeInByte-offset > common.Offset(len(data)) {
+		readLength = len(data)
+	} else {
+		readLength = int(common.ChunkMaxSizeInByte - offset)
+	}
+
+	var (
+		replicasArgs  rpc_struct.RetrieveReplicasArgs
+		replicasReply rpc_struct.RetrieveReplicasReply
+	)
+	replicasArgs.Handle = handle
+	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCGetReplicasHandler", replicasArgs, &replicasReply)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return 0, common.Error{Code: common.UnknownError, Err: err.Error()}
+	}
+	locations := replicasReply.Locations
+
+	if len(locations) != 0 {
+		return 0, common.Error{Code: common.UnknownError, Err: "no available replica"}
+	}
+
+	chosenReadServer := locations[rand.Intn(len(replicasReply.Locations))]
+
+	var (
+		readChunkArg   rpc_struct.ReadChunkArgs
+		readChunkReply rpc_struct.ReadChunkReply
+	)
+	readChunkArg.Handle = handle
+	readChunkArg.Data = data
+	readChunkArg.Length = int64(readLength)
+	readChunkArg.Offset = offset
+	err = utils.CallRPCServer(string(chosenReadServer), "ChunkServer.RPCReadChunkHandler", readChunkArg, &readChunkReply)
+
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return 0, common.Error{Code: common.UnknownError, Err: err.Error()}
+	}
+
+	if readChunkReply.ErrorCode == common.ReadEOF {
+		return int(readChunkReply.Length), common.Error{Code: common.UnknownError, Err: "EOF error during read"}
+	}
+
+	return int(readChunkReply.Length), nil
+
+}
+
+func (c *Client) Write(path common.Path, offset common.Offset, data []byte) error {
+	var (
+		args  rpc_struct.GetFileInfoArgs
+		reply rpc_struct.GetFileInfoReply
+	)
+	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCGetFileInfoHandler", args, &reply)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return err
+	}
+
+	if offset/common.ChunkMaxSizeInByte > common.Offset(reply.Chunks) {
+		return fmt.Errorf("write offset [%v] cannot be greater than the file size", offset)
+	}
+
+	pos := 0
+	for {
+		index := common.Offset(offset / common.ChunkMaxSizeInByte)
+		chunkOffset := offset % common.ChunkMaxSizeInByte
+		handle, err := c.GetChunkHandle(args.Path, common.ChunkIndex(index))
+		if err != nil {
+			log.Err(err).Stack().Msg(err.Error())
+			return err
+		}
+
+		writeMax := int(common.ChunkMaxSizeInByte - chunkOffset)
+		var writeLength int
+		if pos+writeMax > len(data) {
+			writeLength = len(data) - pos
+		} else {
+			writeLength = writeMax
+		}
+
+		for {
+			err = c.WriteChunk(handle, chunkOffset, data[pos:pos+writeLength])
+			if err == nil {
+				break
+			}
+			log.Err(err).Stack().Msg(err.Error())
+		}
+
+		offset += common.Offset(writeLength)
+		pos += writeLength
+		if pos == len(data) {
+			break
+		}
+	}
+
+	return nil
+}
+
+func (c *Client) WriteChunk(handle common.ChunkHandle, offset common.Offset, data []byte) error {
+	totalDataLengthToWrite := len(data) + int(offset)
+	if totalDataLengthToWrite > common.ChunkMaxSizeInByte {
+		return fmt.Errorf("totalDataLengthToWrite = %v is greater than the max chunk size %v", totalDataLengthToWrite, common.ChunkMaxSizeInByte)
+	}
+
+	writeLease, offset, err := c.getLease(handle, offset)
+	if err != nil {
+		return err
+	}
+	servers := append(writeLease.Secondaries, writeLease.Primary)
+	if len(servers) == 0 {
+		return common.Error{Code: common.UnknownError, Err: "no replica"}
+	}
+
+	dataID := chunkserver.NewDBufferId(handle)
+	var d rpc_struct.ForwardDataReply
+	err = utils.CallRPCServer(string(servers[0]),
+		"ChunkServer.RPCForwardData",
+		rpc_struct.ForwardDataArgs{
+			DownloadBufferId: dataID,
+			Data:             data,
+			Replicas:         servers[1:],
+		}, &d)
+	if err != nil {
+		return err
+	}
+
+	writeArgs := rpc_struct.WriteChunkArgs{
+		DownloadBufferId: dataID,
+		Offset:           offset,
+		LeaseExtension:   common.LeaseTimeout,
+		Replicas:         writeLease.Secondaries,
+	}
+	return utils.CallRPCServer(string(writeLease.Primary), "ChunkServer.RPCWriteChunkHandler", writeArgs, &rpc_struct.WriteChunkReply{})
+}
+
+func (c *Client) Append(path common.Path, data []byte) (offset common.Offset, err error) {
+	if len(data) > common.AppendMaxSizeInByte {
+		return 0, fmt.Errorf("len of data [%v] > max append size [%v]", len(data), common.AppendMaxSizeInByte)
+	}
+
+	var (
+		args  rpc_struct.GetFileInfoArgs
+		reply rpc_struct.GetFileInfoReply
+	)
+	err = utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCGetFileInfoHandler", args, &reply)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return
+	}
+
+	// use the last chunk we created on the master server since
+	// we are doing an append mutation
+	start := common.ChunkIndex(reply.Chunks - 1)
+	if start < 0 {
+		start = 0
+	}
+
+	var handle common.ChunkHandle
+	var chunkOffset common.Offset
+	for {
+		handle, err = c.GetChunkHandle(args.Path, common.ChunkIndex(start))
+		if err != nil {
+			log.Err(err).Stack().Msg(err.Error())
+			return
+		}
+		for {
+			chunkOffset, err = c.AppendChunk(handle, data)
+			if err == nil || err.(common.Error).Code == common.AppendExceedChunkSize {
+				break
+			}
+			log.Err(err).Stack().Msg(err.Error())
+			time.Sleep(20 * time.Millisecond)
+		}
+		if err == nil || err.(common.Error).Code == common.AppendExceedChunkSize {
+			break
+		}
+
+		start++
+		log.Info().Msg("padding more on next chunk")
+	}
+	offset = common.Offset(start)*common.ChunkMaxSizeInByte + chunkOffset
+	return
+}
+
+func (c *Client) AppendChunk(handle common.ChunkHandle, data []byte) (common.Offset, error) {
+	var offset common.Offset
+
+	if len(data) > common.AppendMaxSizeInByte {
+		return offset, common.Error{
+			Code: common.UnknownError,
+			Err:  fmt.Sprintf("len(data)[%v]  > max append size (%v)", len(data), common.AppendExceedChunkSize),
+		}
+	}
+
+	appendLease, _, err := c.getLease(handle, 0)
+	if err != nil {
+		return offset, err
+	}
+
+	servers := append(appendLease.Secondaries, appendLease.Primary)
+	if len(servers) == 0 {
+		return offset, common.Error{
+			Code: common.UnknownError,
+			Err:  "no replica",
+		}
+	}
+
+	dataID := chunkserver.NewDBufferId(handle)
+	var d rpc_struct.ForwardDataReply
+	err = utils.CallRPCServer(string(servers[0]),
+		"ChunkServer.RPCForwardData",
+		rpc_struct.ForwardDataArgs{
+			DownloadBufferId: dataID,
+			Data:             data,
+			Replicas:         servers[1:],
+		}, &d)
+	if err != nil {
+		return offset, err
+	}
+
+	var (
+		appendArgs  rpc_struct.AppendChunkArgs
+		appendReply rpc_struct.AppendChunkReply
+	)
+	appendArgs.DownloadBufferId = dataID
+	appendArgs.Replicas = appendLease.Secondaries
+	err = utils.CallRPCServer(string(appendLease.Primary), "ChunkServer.RPCAppendChunkHandler", appendArgs, &appendReply)
+	if err != nil {
+		return -1, common.Error{Code: common.UnknownError, Err: err.Error()}
+	}
+	if appendReply.ErrorCode == common.AppendExceedChunkSize {
+		return appendReply.Offset, common.Error{
+			Code: common.UnknownError,
+			Err:  "exceed append chunk size",
+		}
+	}
+	return appendReply.Offset, nil
+}
+
+func (c *Client) getLease(handle common.ChunkHandle, offset common.Offset) (*common.Lease, common.Offset, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	appendLease, ok := c.leaseCache[handle]
+	if !ok {
+		return nil, offset, common.Error{Code: common.UnknownError,
+			Err: "could not retrieve write lease",
+		}
+	}
+	return appendLease, 0, nil
 }
