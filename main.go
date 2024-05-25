@@ -21,6 +21,7 @@ func main() {
 	master := flag.Bool("isMaster", false, "should run program as master server")
 	addr := flag.String("serverAddress", "127.0.0.1:8085", "port to listen on")
 	maddr := flag.String("masterAddr", "127.0.0.1:9090", "master server addr")
+	rootFs := flag.String("rootDir", "./croot", "file system dir to use")
 
 	flag.Parse()
 	quit := make(chan os.Signal, 1)
@@ -30,7 +31,7 @@ func main() {
 		<-quit
 		masterserver.Shutdown()
 	} else {
-		chunkserver := chunkserver.NewChunkServer(common.ServerAddr(*addr), common.ServerAddr(*maddr), "./croot")
+		chunkserver := chunkserver.NewChunkServer(common.ServerAddr(*addr), common.ServerAddr(*maddr), *rootFs)
 		<-quit
 		chunkserver.Shutdown()
 	}
