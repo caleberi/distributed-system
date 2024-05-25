@@ -313,6 +313,7 @@ func (nm *namespaceManager) MkDirAll(p common.Path) error {
 		}
 		err = nm.MkDir(common.Path(currPath))
 		if err != nil {
+			log.Info().Msg("current path -> " + currPath)
 			return err
 		}
 	}
@@ -321,12 +322,13 @@ func (nm *namespaceManager) MkDirAll(p common.Path) error {
 
 func (nm *namespaceManager) Get(p common.Path) (*nsTree, error) {
 	dirpath, filenameOrDirname := nm.retrievePartitionFromPath(p)
+	log.Info().Msg(fmt.Sprintf("dirpath [%v] & filenameOrDirname [%v]", dirpath, filenameOrDirname))
 	parents, cwd, err := nm.lockParents(common.Path(dirpath), false)
 	defer nm.unlockParents(parents, false)
 	if err != nil {
 		return nil, err
 	}
-
+	log.Info().Msg(fmt.Sprintf("cwd [%v] & parents [%v]", cwd, parents))
 	if dir, ok := cwd.childrenNodes[filenameOrDirname]; ok {
 		return dir, nil
 	}
