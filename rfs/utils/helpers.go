@@ -16,9 +16,17 @@ func Map[T, V comparable](data []T, fn func(v T) V) []V {
 	return result
 }
 
-func ForEach[T comparable](data []T, fn func(v T)) {
+func ForEach[T any](data []T, fn func(v T)) {
 	for _, dt := range data {
 		fn(dt)
+	}
+}
+
+func ExtractFromMap[K, V comparable](data, result map[K]V, fn func(value V) bool) {
+	for k, v := range data {
+		if fn(v) {
+			result[k] = v
+		}
 	}
 }
 
