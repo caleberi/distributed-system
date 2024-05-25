@@ -14,12 +14,16 @@ const (
 	PersistMetaData            Event  = "PersistMetaData"
 	PersistOpsLog              Event  = "PersistOpsLog"
 	MasterHeartBeat            Event  = "MasterHeartBeat"
+	Archival                   Event  = "Archival"
 
 	// chunk server
+	ArchivalDaySpan                         = 5
 	HeartBeatInterval         time.Duration = 30 * time.Second
 	GarbageCollectionInterval time.Duration = 30 * time.Minute
 	PersistMetaDataInterval   time.Duration = 10 * time.Hour
+	ArchiveChunkInterval      time.Duration = ArchivalDaySpan * 24 * time.Hour
 	ChunkMetaDataFileName                   = "chunk.server.meta"
+	ChunkFileNameFormat                     = "chunk-%v.chk"
 	ChunkMaxSizeInMb                        = 64
 	ChunkMaxSizeInByte                      = 64 << 20 // 1024 * 1024 * 64
 	AppendMaxSizeInByte                     = ChunkMaxSizeInByte / 4
@@ -37,7 +41,7 @@ const (
 	// replicationFactor
 	MinimumReplicationFactor = 3
 
-	LeaseTimeout = 1 * time.Second
+	LeaseTimeout = 30 * time.Second
 
 	// file constant
 	FileMode = 0755

@@ -1,5 +1,7 @@
 package common
 
+import "time"
+
 type MutationType int
 type Offset int64
 type ChunkVersion int64
@@ -49,11 +51,28 @@ type MachineInfo struct {
 	Hostname               string
 }
 
+type Mutation struct {
+	MutationType MutationType // action type for this mutation
+	Data         []byte       // the data to be append / written/ deleted from chunk
+	Offset       Offset       // takes note of the starting point of a particular mutation
+}
+
 type PersistedChunkInfo struct {
-	Handle   ChunkHandle
-	Version  ChunkVersion
-	Length   Offset
-	Checksum Checksum
+	Handle               ChunkHandle
+	Version              ChunkVersion
+	Length               Offset
+	Checksum             Checksum
+	Mutations            map[ChunkVersion]Mutation
+	Completed, Abandoned bool      // this handle is completed <that is it is filled>
+	ChunkSize            int64     // Size of the chunk
+	CreationTime         time.Time // Creation time of the chunk
+	LastModified         time.Time // Last modified time of the chunk
+	AccessTime           time.Time // Last access time of the chunk
+	Replication          int       // Replication level of the chunk (we need to know the number of replication  that we have )
+	ServerIP             string    // IP address of the chunk server
+	ServerStatus         int       // Status of the chunk server (last know server )
+	MetadataVersion      int       // Version of metadata associated with the chunk
+	StatusFlags          []string  // Flags indicating the status of the chunk
 }
 type Memory struct {
 	Alloc      uint64
