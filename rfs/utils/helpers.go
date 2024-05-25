@@ -87,3 +87,10 @@ func Sample(n, k int) ([]int, error) {
 	}
 	return rand.Perm(n)[:k], nil
 }
+
+func ComputeChecksum(content string) string {
+	hash := sha256.New()
+	hash.Write([]byte(content))
+	checksum := hash.Sum(nil)
+	return hex.EncodeToString(checksum)
+}
