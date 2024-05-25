@@ -1,11 +1,15 @@
 package utils
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math/rand"
 	"net/rpc"
+	"strings"
 
 	"github.com/caleberi/distributed-system/rfs/common"
+	"github.com/rs/zerolog/log"
 )
 
 func Map[T, V comparable](data []T, fn func(v T) V) []V {
