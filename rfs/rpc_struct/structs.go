@@ -133,7 +133,8 @@ type GetChunkHandleArgs struct {
 }
 
 type GetPathInfoArgs struct {
-	Path common.Path
+	Path   common.Path
+	Handle common.ChunkHandle
 }
 
 type GetPathInfoReply struct {
@@ -179,4 +180,8 @@ type RetrieveReplicasArgs struct {
 }
 type RetrieveReplicasReply struct {
 	Locations []common.ServerAddr
+}
+
+type GetPathInfoArg struct {
+	Handle common.ChunkHandle
 }
