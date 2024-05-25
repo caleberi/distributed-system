@@ -53,14 +53,20 @@ func ValidateFilenameStr(filename string, p common.Path) (bool, error) {
 }
 
 func CallRPCServer(addr string, method string, args any, reply any) error {
+	log.Info().Msgf("addr=%s method=%s args=%#v ", addr, method, args)
 	client, err := rpc.Dial("tcp", addr)
 	if err != nil {
+		if strings.Contains(err.Error(), "dial tcp: missing address") {
+			log.Info().Msgf("err=%s addr=%s method=%s args=%#v ", err.Error(), addr, method, args)
+		}
 		return err
 	}
+	defer client.Close()
 	err = client.Call(method, args, reply)
 	if err != nil {
 		return err
 	}
+
 	return nil
 }
 
