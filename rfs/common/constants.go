@@ -8,6 +8,15 @@ type BranchInfo struct {
 }
 
 const (
+	HeartBeat         Event = "HeartBeat"
+	GarbageCollection Event = "GarbageCollection"
+	PersistMetaData   Event = "PersistMetaData"
+	PersistOpsLog     Event = "PersistOpsLog"
+	MasterHeartBeat   Event = "MasterHeartBeat"
+	Archival          Event = "Archival"
+)
+
+const (
 	DeletedNamespaceFilePrefix string = "___deleted__"
 	HeartBeat                  Event  = "HeartBeat"
 	GarbageCollection          Event  = "GarbageCollection"
