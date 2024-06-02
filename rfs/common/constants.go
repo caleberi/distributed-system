@@ -18,24 +18,23 @@ const (
 
 const (
 	DeletedNamespaceFilePrefix string = "___deleted__"
-	HeartBeat                  Event  = "HeartBeat"
-	GarbageCollection          Event  = "GarbageCollection"
-	PersistMetaData            Event  = "PersistMetaData"
-	PersistOpsLog              Event  = "PersistOpsLog"
-	MasterHeartBeat            Event  = "MasterHeartBeat"
-	Archival                   Event  = "Archival"
+
+	// archiving mechanism
+	ArchivalDaySpan                    = 5
+	ArchiveChunkInterval time.Duration = ArchivalDaySpan * 24 * time.Hour
 
 	// chunk server
 	ArchivalDaySpan                         = 5
 	HeartBeatInterval         time.Duration = 30 * time.Second
 	GarbageCollectionInterval time.Duration = 30 * time.Minute
 	PersistMetaDataInterval   time.Duration = 10 * time.Hour
-	ArchiveChunkInterval      time.Duration = ArchivalDaySpan * 24 * time.Hour
-	ChunkMetaDataFileName                   = "chunk.server.meta"
-	ChunkFileNameFormat                     = "chunk-%v.chk"
-	ChunkMaxSizeInMb                        = 64
-	ChunkMaxSizeInByte                      = 64 << 20 // 1024 * 1024 * 64
-	AppendMaxSizeInByte                     = ChunkMaxSizeInByte / 4
+
+	// chunk file information
+	ChunkMetaDataFileName = "chunk.server.meta"
+	ChunkFileNameFormat   = "chunk-%v.chk"
+	ChunkMaxSizeInMb      = 64
+	ChunkMaxSizeInByte    = 64 << 20 // 1024 * 1024 * 64
+	AppendMaxSizeInByte   = ChunkMaxSizeInByte / 4
 
 	// downloadbuffer
 	DownloadBufferItemExpire = 1 * time.Minute
@@ -55,6 +54,7 @@ const (
 	// file constant
 	FileMode = 0755
 
+	// Mutation flags
 	MutationAppend = (iota + 1) << 1
 	MutationWrite
 	MutationPad
