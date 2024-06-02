@@ -24,7 +24,6 @@ const (
 	ArchiveChunkInterval time.Duration = ArchivalDaySpan * 24 * time.Hour
 
 	// chunk server
-	ArchivalDaySpan                         = 5
 	HeartBeatInterval         time.Duration = 30 * time.Second
 	GarbageCollectionInterval time.Duration = 30 * time.Minute
 	PersistMetaDataInterval   time.Duration = 10 * time.Hour
