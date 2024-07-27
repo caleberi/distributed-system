@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	chunkserver "github.com/caleberi/distributed-system/rfs/chunk_server"
+	chunkserver "github.com/caleberi/distributed-system/rfs/chunkserver"
 	"github.com/caleberi/distributed-system/rfs/common"
 	"github.com/caleberi/distributed-system/rfs/rpc_struct"
 	"github.com/caleberi/distributed-system/rfs/utils"
@@ -39,7 +39,7 @@ func NewClient(addr common.ServerAddr, cacheTickerDuration time.Duration) *Clien
 			case <-tick.C:
 				cl.mu.Lock()
 				for _, item := range cl.leaseCache {
-					if item.Expire.Before(time.Now().Add(30 * time.Second)) {
+					if item.IsExpired(time.Now().Add(30 * time.Second)) {
 						delete(cl.leaseCache, item.Handle)
 					}
 				}
@@ -71,6 +71,9 @@ func (c *Client) getLease(handle common.ChunkHandle, offset common.Offset) (*com
 			}
 		}
 		c.mu.Lock()
+		if ls.IsExpired(time.Now()) {
+			log.Info().Msgf("getLease = %v has expired before use", ls)
+		}
 		c.leaseCache[handle] = ls
 		c.mu.Unlock()
 		return ls, 0, nil
@@ -115,6 +118,10 @@ func (c *Client) GetChunkServers(handle common.ChunkHandle) (*common.Lease, erro
 			Expire:      info.Expire,
 			Primary:     info.Primary,
 			Secondaries: info.SecondaryServers,
+		}
+
+		if nls.IsExpired(time.Now()) {
+			log.Info().Msgf("GetChunkServers = %v has expired before use", nls)
 		}
 		c.mu.Lock()
 		c.leaseCache[handle] = nls
@@ -402,7 +409,7 @@ func (c *Client) WriteChunk(handle common.ChunkHandle, offset common.Offset, dat
 
 	if writeLease.Primary == "" {
 		writeLease.Primary = servers[0]
-		writeLease.Secondaries = servers[1:]
+		servers = servers[1:]
 	}
 
 	log.Info().Msgf("Servers from the lease = %v", servers)
@@ -434,8 +441,7 @@ func (c *Client) WriteChunk(handle common.ChunkHandle, offset common.Offset, dat
 	writeArgs := rpc_struct.WriteChunkArgs{
 		DownloadBufferId: dataID,
 		Offset:           offset,
-		LeaseExtension:   time.Duration(writeLease.Expire.Second()),
-		Replicas:         servers[1:],
+		Replicas:         servers,
 	}
 
 	return utils.CallRPCServer(
@@ -521,10 +527,7 @@ func (c *Client) AppendChunk(handle common.ChunkHandle, data []byte) (common.Off
 		appendLease.Secondaries = servers[1:]
 	}
 	if len(servers) == 0 {
-		return offset, common.Error{
-			Code: common.UnknownError,
-			Err:  "no replica",
-		}
+		return offset, common.Error{Code: common.UnknownError, Err: "no replica"}
 	}
 
 	dataID := chunkserver.NewDBufferId(handle)
@@ -557,7 +560,10 @@ func (c *Client) AppendChunk(handle common.ChunkHandle, data []byte) (common.Off
 	)
 	appendArgs.DownloadBufferId = dataID
 	appendArgs.Replicas = appendLease.Secondaries
-	err = utils.CallRPCServer(string(appendLease.Primary), "ChunkServer.RPCAppendChunkHandler", appendArgs, &appendReply)
+	err = utils.CallRPCServer(
+		string(appendLease.Primary),
+		"ChunkServer.RPCAppendChunkHandler",
+		appendArgs, &appendReply)
 	if err != nil {
 		return -1, common.Error{Code: common.UnknownError, Err: err.Error()}
 	}

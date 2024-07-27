@@ -32,7 +32,7 @@ func TestWriteDataFromChunkServer(t *testing.T) {
 	addr := "127.0.0.1:9090"
 	client := NewClient(common.ServerAddr(addr), 30*time.Millisecond)
 	defer client.Close()
-	handle, err := client.GetChunkHandle("/images/independent-day-14", common.ChunkIndex(0))
+	handle, err := client.GetChunkHandle("/images/independent-day-100", common.ChunkIndex(0))
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return
@@ -40,7 +40,7 @@ func TestWriteDataFromChunkServer(t *testing.T) {
 	log.Info().Msg(fmt.Sprintf("Got a new handle : %v", handle))
 	data := []byte("this is good")
 
-	err = client.Write("/images/independent-day-14", common.Offset(0), data)
+	err = client.Write("/images/independent-day-100", common.Offset(0), data)
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return
