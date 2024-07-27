@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/caleberi/distributed-system/rfs/filesystem"
+	filesystem "github.com/caleberi/distributed-system/rfs/fs"
 )
 
 const ZIP_EXT = ".gz"
