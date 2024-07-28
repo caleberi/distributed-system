@@ -36,7 +36,7 @@ const (
 	AppendMaxSizeInByte   = ChunkMaxSizeInByte / 4
 
 	// downloadbuffer
-	DownloadBufferItemExpire = 1 * time.Minute
+	DownloadBufferItemExpire = 60 * time.Second
 	DownloadBufferTick       = 15 * time.Second
 
 	// master server
@@ -48,7 +48,7 @@ const (
 	// replicationFactor
 	MinimumReplicationFactor = 3
 
-	LeaseTimeout = 30 * time.Second
+	LeaseTimeout = 60 * time.Second
 
 	// file constant
 	FileMode = 0755
