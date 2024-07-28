@@ -6,9 +6,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	chunkserver "github.com/caleberi/distributed-system/rfs/chunk_server"
+	chunkserver "github.com/caleberi/distributed-system/rfs/chunkserver"
 	"github.com/caleberi/distributed-system/rfs/common"
-	"github.com/caleberi/distributed-system/rfs/master_server"
+	masterserver "github.com/caleberi/distributed-system/rfs/master"
 	"github.com/rs/zerolog"
 )
 
@@ -27,7 +27,7 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	if *master {
-		masterserver := master_server.NewMasterServer(common.ServerAddr(*maddr), "./mroot")
+		masterserver := masterserver.NewMasterServer(common.ServerAddr(*maddr), "./mroot")
 		<-quit
 		masterserver.Shutdown()
 	} else {
