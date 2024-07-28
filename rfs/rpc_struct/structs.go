@@ -10,6 +10,7 @@ type HeartBeatArg struct {
 	Address       common.ServerAddr
 	PendingLeases []*common.Lease
 	MachineInfo   common.MachineInfo
+	ExtendLease   bool
 }
 type HeartBeatReply struct {
 	LastHeartBeat   time.Time
@@ -67,7 +68,6 @@ type WriteChunkArgs struct {
 	DownloadBufferId common.BufferId
 	Offset           common.Offset
 	Replicas         []common.ServerAddr
-	LeaseExtension   time.Duration
 }
 
 type WriteChunkReply struct {
@@ -184,4 +184,15 @@ type RetrieveReplicasReply struct {
 
 type GetPathInfoArg struct {
 	Handle common.ChunkHandle
+}
+
+type GrantLeaseInfoArgs struct {
+	Handle      common.ChunkHandle
+	Expire      time.Time
+	InUse       bool
+	Primary     common.ServerAddr
+	Secondaries []common.ServerAddr
+}
+
+type GrantLeaseInfoReply struct {
 }
