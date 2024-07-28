@@ -118,6 +118,14 @@ func (qs *Deque[T]) PopBack() T {
 	return node.data
 }
 
+func (qs *Deque[T]) PopAll() []T {
+	var ret []T
+	for qs.Length() != 0 {
+		ret = append(ret, qs.PopBack())
+	}
+	return ret
+}
+
 func (qs *Deque[T]) Print(w io.Writer) {
 	buffer := bytes.NewBufferString("")
 	for current := qs.head; current != nil; current = current.next {

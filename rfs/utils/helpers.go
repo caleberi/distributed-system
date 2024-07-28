@@ -26,6 +26,12 @@ func ForEach[T any](data []T, fn func(v T)) {
 	}
 }
 
+func LoopOverMap[T comparable, V comparable](data map[T]V, fn func(k T, V V)) {
+	for k, v := range data {
+		fn(k, v)
+	}
+}
+
 func ExtractFromMap[K, V comparable](data, result map[K]V, fn func(value V) bool) {
 	for k, v := range data {
 		if fn(v) {
@@ -65,7 +71,7 @@ func ValidateFilenameStr(filename string, p common.Path) (bool, error) {
 }
 
 func CallRPCServer(addr string, method string, args any, reply any) error {
-	log.Info().Msgf("addr=%s method=%s args=%#v ", addr, method, args)
+	log.Info().Msgf("addr=%s method=%s", addr, method)
 	client, err := rpc.Dial("tcp", addr)
 	if err != nil {
 		if strings.Contains(err.Error(), "dial tcp: missing address") {
