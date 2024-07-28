@@ -63,7 +63,7 @@ type PersistedChunkInfo struct {
 	Length               Offset
 	Checksum             Checksum
 	Mutations            map[ChunkVersion]Mutation
-	Completed, Abandoned bool      // this handle is completed <that is it is filled>
+	Completed, Abandoned bool      // this handle is completed <that it is filled>
 	ChunkSize            int64     // Size of the chunk
 	CreationTime         time.Time // Creation time of the chunk
 	LastModified         time.Time // Last modified time of the chunk
@@ -85,4 +85,16 @@ type FileInfo struct {
 	IsDir  bool
 	Length int64
 	Chunks int64
+}
+
+type Lease struct {
+	Handle      ChunkHandle // each lease acquired should be associated to a particular chunkhandle
+	Expire      time.Time
+	InUse       bool
+	Primary     ServerAddr   // the current chunk server (as primary)
+	Secondaries []ServerAddr // to notice all secondary  chunk server
+}
+
+func (ls *Lease) IsExpired(u time.Time) bool {
+	return ls.Expire.Before(u)
 }
