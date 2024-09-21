@@ -6,26 +6,25 @@ import (
 	"time"
 
 	"github.com/caleberi/distributed-system/rfs/common"
+	"github.com/caleberi/distributed-system/rfs/utils"
 	"github.com/rs/zerolog/log"
 )
 
-// TODO: optimize bufferedItem by packing bit together
-// using encoding/binary
 type bufferedItem struct {
-	data   []byte    // actual binary representation of data using a buffer(byte)
-	expire time.Time // the time when this data item expires
+	data   []byte
+	expire time.Time
 }
 
 type dbuffer struct {
 	mu     sync.RWMutex
-	done   chan bool                         // need this to prevent memory leaks
-	buffer map[common.BufferId]*bufferedItem // cache all buffered item
+	done   chan bool
+	buffer map[common.BufferId]*bufferedItem
 	expire time.Duration
-	tick   time.Duration // track this buffer expiry time for clean up
+	tick   time.Duration
 }
 
-// NewDBuffer this create a download buffer and returns it
-// but it creates a routine for cleaning up expired buffer items
+// NewDBuffer create a download buffer and returns it and
+// runs a routine for cleaning up expired buffer items
 func NewDBuffer(tick, expire time.Duration) *dbuffer {
 	dbuf := &dbuffer{
 		done:   make(chan bool, 1),
@@ -39,13 +38,15 @@ func NewDBuffer(tick, expire time.Duration) *dbuffer {
 		for {
 			select {
 			case <-ticker.C:
-				for key, item := range dbuf.buffer {
-					if item.expire.Before(time.Now()) {
-						dbuf.mu.Lock()
-						delete(dbuf.buffer, key)
-						dbuf.mu.Unlock()
+
+				utils.LoopOverMap(dbuf.buffer, func(key common.BufferId, item *bufferedItem) {
+					if !item.expire.Before(time.Now()) {
+						return
 					}
-				}
+					dbuf.mu.Lock()
+					delete(dbuf.buffer, key)
+					dbuf.mu.Unlock()
+				})
 
 			case <-dbuf.done:
 				log.Info().Msg("Closing download buffer")
