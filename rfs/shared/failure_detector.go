@@ -1,7 +1,9 @@
 package shared
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"time"
 
@@ -15,20 +17,28 @@ const storePrefix = "__store__"
 
 // A failure detection package - using ϕ Accrual Failure Detection Algorithm
 // Sources - (1) https://medium.com/@arpitbhayani/phi-%CF%86-accrual-failure-detection-79c21ce53a7a
+//           (2) https://ieeexplore.ieee.org/abstract/document/1353004
 //
-//	(2) https://ieeexplore.ieee.org/abstract/document/1353004
-//
-// Goal - create redis backed module that can predict downtime probablity of servers
+// Goal - create redis backed service that can predict downtime probablity of servers
 // The implementation of failure detectors on the receiving server can be decomposed into three basic parts
 // as follows:
-// 1. Monitoring. The failure detector gathers information from other processes, usually through the network,such as heartbeat arrivals or query-response delays.
-//   - Since we are leaving the user to provide the necessary data for the system after obtaining
+// 1. Monitoring. The failure detector gathers information from other processes,
+//    usually through the network,such as heartbeat arrivals or query-response delays.
+//    Since we are leaving the user to provide the necessary data for the system after obtaining
 //     it via RPC or REST e.t.c Then we define an NetworkData struct that takes in few information about
 //     the network
+// 2. Interpretation. Monitoring information is used and interpreted, for instance to decide that a process should be suspected.
+// 3. Action. Actions are executed as a response to triggered suspicions. This is normally done within applications.
 
 type TripInfo struct {
-	SentAt     time.Duration
-	RecievedAt time.Duration
+	SentAt     time.Time
+	RecievedAt time.Time
+}
+
+// Valid checks if the interval between clock time on server
+// do not tell lies (Since even clocks do lie)
+func (tf TripInfo) Valid() bool {
+	return tf.SentAt.Before(tf.RecievedAt)
 }
 
 type NetworkData struct {
@@ -44,24 +54,20 @@ type NetworkData struct {
 	IpAddress common.ServerAddr
 }
 
-// 2. Interpretation. Monitoring information is used and interpreted,
-// for instance to decide that a process should be suspected.
-
+// Suspicion level between a scale of 100
 type SuspicionLevel struct {
 	AccruementThreshold, UpperBoundThreshold, ResetThreshold float64
 }
 
-// 3. Action. Actions are executed as a response to triggered
-// suspicions. This is normally done within applications.
 type ActionMessage string
 
 const (
-	accumentThresholdAlert   ActionMessage = "<ALERT> TENDING TOWARDS SYSTEM"
+	accumentThresholdAlert   ActionMessage = "<ALERT> TENDING TOWARDS SYSTEM FAILURE"
 	upperBoundThresholdAlert ActionMessage = "<WARNING> SYSTEM STILL CORRECT"
 	resetThresholdAlert      ActionMessage = "<INFO> SYSTEM ALL GOOD"
 
-	ErrorHistoricalSampling         string = "<ERROR> HISTORICAL SAMPLING ERROR"
-	ErrorNotEnoughistoricalSampling string = "<ERROR> HISTORICAL SAMPLING ERROR"
+	ErrorHistoricalSampling         string = "<ERROR> HISTORICAL SAMPLING ISSUES"
+	ErrorNotEnoughistoricalSampling string = "<ERROR> NO ENOUGH HISTORICAL SAMPLES"
 )
 
 type Prediction struct {
@@ -84,17 +90,26 @@ type FailureDetector struct {
 	SuspicionLevel SuspicionLevel
 }
 
-func NewFailureDetector(url string, refreshRate int64, cleanUpInterval time.Duration) *FailureDetector {
-	Cache := redis.NewClient(&redis.Options{Addr: url})
+func NewFailureDetector(
+	url string,
+	refreshRate int64,
+	cleanUpInterval time.Duration,
+	suspicionLevel SuspicionLevel) (*FailureDetector, error) {
+	cache := redis.NewClient(&redis.Options{Addr: url})
+
+	if _, err := cache.Ping().Result(); err != nil {
+		return nil, err
+	}
 
 	failureDetector := &FailureDetector{
-		Cache:           Cache,
+		Cache:           cache,
 		RefreshRate:     refreshRate,
 		CleanUpInterval: cleanUpInterval,
 		ShutdownCh:      make(chan bool, 1),
+		SuspicionLevel:  suspicionLevel,
 	}
 
-	flushingTicker := time.NewTicker(failureDetector.CleanUpInterval)
+	flushingTicker := time.NewTicker(failureDetector.CleanUpInterval / time.Duration(refreshRate))
 	go func() {
 		for {
 			select {
@@ -117,46 +132,67 @@ func NewFailureDetector(url string, refreshRate int64, cleanUpInterval time.Dura
 			}
 		}
 	}()
-	return failureDetector
+	return failureDetector, nil
+}
+
+type Points struct {
+	Data []float64 `json:"data,omitempty"`
 }
 
 func (fd *FailureDetector) Store(data NetworkData) error {
-	var (
-		key  = storePrefix + string(data.IpAddress)
-		ttls = []float64{}
-	)
-	result, err := fd.Cache.HMGet(key, "*").Result()
-
-	if err != nil {
+	key := storePrefix + string(data.IpAddress)
+	ttls := Points{}
+	result, err := fd.Cache.HGet(key, "*").Result()
+	if err != nil && err != redis.Nil {
+		log.Err(err).Stack().Msg("")
 		return err
 	}
-
-	if result != nil {
-		for i := 0; i < len(result); i++ {
-			val, ok := result[i].(float64)
-			if !ok {
-				continue
-			}
-			ttls = append(ttls, val)
+	if result != "" {
+		err = json.Unmarshal([]byte(result), &ttls)
+		if err != nil {
+			return err
 		}
 	}
 
+	utils.ForEach(ttls.Data, func(v float64) { ttls.Data = append(ttls.Data, v) })
+
+	if !data.ForwardTrip.Valid() && !data.BackwardTrip.Valid() {
+		return fmt.Errorf(
+			"the time %v and %v for the provided forward and backward is invalid",
+			data.ForwardTrip,
+			data.BackwardTrip)
+	}
 	if data.RoundRobinTrip == 0 {
-		timeToForwardDestination := data.ForwardTrip.RecievedAt.Seconds() - data.ForwardTrip.SentAt.Seconds()
-		timeToBackwardDestination := data.BackwardTrip.RecievedAt.Seconds() - data.BackwardTrip.SentAt.Seconds()
+		timeToForwardDestination := data.ForwardTrip.RecievedAt.Sub(data.ForwardTrip.SentAt).Milliseconds()
+		timeToBackwardDestination := data.BackwardTrip.RecievedAt.Sub(data.BackwardTrip.SentAt).Milliseconds()
 		data.RoundRobinTrip = time.Duration(timeToBackwardDestination + timeToForwardDestination)
 	}
-	ttls = append(ttls, data.RoundRobinTrip.Seconds())
-	return fd.Cache.HSet(key, "*", ttls).Err()
+
+	log.Info().Msgf("NetworkData = %#v\n", data)
+	log.Info().Msgf("RoundRobinTrip = %v\n", data.RoundRobinTrip)
+	ttls.Data = append(ttls.Data, float64(data.RoundRobinTrip))
+	jsn, err := json.Marshal(ttls)
+	if err != nil {
+		return err
+	}
+	return fd.Cache.HSet(key, "*", jsn).Err()
 }
 
-func errorFunc(x, stdDev, variance float64) float64 {
-	return math.Exp(-math.Pow((x-stdDev), 2.0) / (2 * variance))
+func calculatePhil(x, mean, stdDev float64) float64 {
+	y := (x - mean) / stdDev
+	// https://github.com/akka/akka/issues/1821
+	e := math.Exp(-y / (1.5976 + 0.070566*y*y))
+
+	if x > mean {
+		return -math.Log(e / (1.0 + e))
+	}
+	return -math.Log10(1.0 - 1.0/(1.0+e))
 }
 
 func (fd *FailureDetector) Predict(addr string, windowSize int) (Prediction, error) {
 	// - First, heartbeats arrive and their arrival times are stored in a sampling window.
 	window, err := fd.sample(addr, windowSize)
+	log.Info().Msgf("window = %v\n", window)
 	if err != nil {
 		return Prediction{}, errors.New(ErrorHistoricalSampling)
 	}
@@ -166,23 +202,21 @@ func (fd *FailureDetector) Predict(addr string, windowSize int) (Prediction, err
 	}
 	// - Second,these past samples are used to determine the distributionof inter-arrival times.
 	mean := utils.Sum(window) / float64(len(window))
-	totalSquaredDeviation := 0.0
-
-	utils.ForEach(window, func(v float64) {
-		totalSquaredDeviation += math.Pow(v-mean, 2.0)
-	})
-
-	variance := totalSquaredDeviation / float64(len(window))
+	totalSquaredInterval := 0.0
+	utils.ForEach(window, func(v float64) { totalSquaredInterval += math.Pow(v-mean, 2.0) })
+	variance := totalSquaredInterval / float64(len(window))
+	log.Info().Msgf("variance = %v\n", variance)
 	stdDev := math.Sqrt(variance)
-	tNow := time.Since(time.Time{}).Seconds()
-	tLast := window[len(window)-2]
-
+	log.Info().Msgf("stdDev = %v\n", stdDev)
+	tNow := float64(time.Since(time.Time{}))
+	tLast := window[len(window)-1]
 	// - Third, the distribution is in turn used to compute the current value of ϕ.
-	probablityOfGettingHBLater := (1 / (stdDev * math.Sqrt(2*math.Pi))) * errorFunc(tNow-tLast, stdDev, variance)
+	phil := calculatePhil(tNow-tLast, mean, stdDev) * 100
 
-	// suspicion level
-	phil := -(math.Log10(probablityOfGettingHBLater))
-
+	if phil == math.Inf(-1) {
+		return Prediction{}, nil
+	}
+	log.Info().Msgf("phil = %v\n", phil)
 	action := resetThresholdAlert
 
 	if phil >= fd.SuspicionLevel.AccruementThreshold {
@@ -200,29 +234,28 @@ func (fd *FailureDetector) Predict(addr string, windowSize int) (Prediction, err
 }
 
 func (fd *FailureDetector) sample(addr string, windowSize int) ([]float64, error) {
-	var (
-		key  = storePrefix + addr
-		ttls = []float64{}
-	)
-	result, err := fd.Cache.HMGet(key, "*").Result()
-	if err != nil {
+	key := storePrefix + addr
+	ttls := Points{}
+
+	result, err := fd.Cache.HGet(key, "*").Result()
+	if err != nil && err != redis.Nil {
+		log.Err(err).Stack().Msg("")
 		return nil, err
 	}
 
-	if result != nil {
-		for i := 0; i < len(result); i++ {
-			val, ok := result[i].(float64)
-			if !ok {
-				continue
-			}
-			ttls = append(ttls, val)
+	if result != "" {
+		err = json.Unmarshal([]byte(result), &ttls)
+		if err != nil {
+			return nil, err
 		}
 	}
 
+	utils.ForEach(ttls.Data, func(v float64) { ttls.Data = append(ttls.Data, v) })
+
 	var sampleSpace []float64
 
-	for i, j := windowSize-1, len(ttls)-1; windowSize > 0 && j > 0; {
-		sampleSpace = append(sampleSpace, ttls[j])
+	for i, j := windowSize-1, len(ttls.Data)-1; windowSize > 0 && j > 0; {
+		sampleSpace = append(sampleSpace, ttls.Data[j])
 		j -= 1
 		i -= 1
 	}

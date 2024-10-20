@@ -25,6 +25,7 @@ import (
 	"github.com/caleberi/distributed-system/rfs/common"
 	filesystem "github.com/caleberi/distributed-system/rfs/fs"
 	"github.com/caleberi/distributed-system/rfs/rpc_struct"
+	"github.com/caleberi/distributed-system/rfs/shared"
 	"github.com/caleberi/distributed-system/rfs/utils"
 )
 
@@ -45,20 +46,23 @@ type chunkInfo struct {
 }
 
 type ChunkServer struct {
-	ServerAddr, MasterAddr common.ServerAddr
-	MachineInfo            common.MachineInfo
+	ServerAddr  common.ServerAddr
+	MasterAddr  common.ServerAddr
+	MachineInfo common.MachineInfo
 
-	listener            net.Listener
-	rootDir             *filesystem.FileSystem
-	mu                  sync.RWMutex
-	downloadBuffer      *dbuffer
-	archiver            *common.Archiver
-	leases              utils.Deque[*common.Lease]
-	leasesUnderMutation map[*common.Lease]bool
-	chunks              map[common.ChunkHandle]*chunkInfo
-	garbage             utils.Deque[common.ChunkHandle]
-	shutdownChan        chan os.Signal
-	isDead              bool
+	listener        net.Listener
+	failureDetector *shared.FailureDetector
+	rootDir         *filesystem.FileSystem
+	mu              sync.RWMutex
+	downloadBuffer  *dbuffer
+	archiver        *common.Archiver
+	leases          utils.Deque[*common.Lease]
+	// leasesUnderMutation map[*common.Lease]bool
+	failureDetectionCh chan string
+	chunks             map[common.ChunkHandle]*chunkInfo
+	garbage            utils.Deque[common.ChunkHandle]
+	shutdownChan       chan os.Signal
+	isDead             bool
 }
 
 // PersistedMetaData represents metadata associated with a GFS chunk.
@@ -93,18 +97,29 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 	machineInfo.Hostname = hostname
 	machineInfo.RoundTripProximityTime = calculateRoundTripProximity(15, string(masterAddr))
 
+	failureDetector, err := shared.NewFailureDetector("127.0.0.1:6379", 2, 5*time.Minute, shared.SuspicionLevel{
+		AccruementThreshold: 70,
+		UpperBoundThreshold: 30,
+		ResetThreshold:      15,
+	})
+	if err != nil {
+		log.Fatal().Msg("failure detector could not be started\n")
+	}
+
 	fs := filesystem.NewFileSystem(root)
 	cs := &ChunkServer{
-		ServerAddr:   serverAddr,
-		MasterAddr:   masterAddr,
-		MachineInfo:  machineInfo,
-		rootDir:      fs,
-		leases:       utils.Deque[*common.Lease]{},
-		chunks:       make(map[common.ChunkHandle]*chunkInfo),
-		shutdownChan: make(chan os.Signal),
-		garbage:      utils.Deque[common.ChunkHandle]{},
-		isDead:       false,
-		archiver:     common.NewArchiver(fs),
+		ServerAddr:         serverAddr,
+		MasterAddr:         masterAddr,
+		MachineInfo:        machineInfo,
+		rootDir:            fs,
+		leases:             utils.Deque[*common.Lease]{},
+		chunks:             make(map[common.ChunkHandle]*chunkInfo),
+		shutdownChan:       make(chan os.Signal),
+		failureDetectionCh: make(chan string),
+		garbage:            utils.Deque[common.ChunkHandle]{},
+		isDead:             false,
+		archiver:           common.NewArchiver(fs),
+		failureDetector:    failureDetector,
 		downloadBuffer: NewDBuffer(
 			common.DownloadBufferTick,
 			common.DownloadBufferItemExpire,
@@ -141,6 +156,7 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 		for {
 			select {
 			case <-cs.shutdownChan:
+				cs.failureDetector.ShutdownCh <- true
 				return
 			default:
 			}
@@ -378,19 +394,48 @@ func (cs *ChunkServer) loadMetadata() error {
 }
 
 func (cs *ChunkServer) heartBeat() error {
-	arg := rpc_struct.HeartBeatArg{Address: cs.ServerAddr, MachineInfo: cs.MachineInfo}
+	arg := rpc_struct.HeartBeatArg{
+		Address:     cs.ServerAddr,
+		MachineInfo: cs.MachineInfo,
+	}
 	if cs.leases.Length() != 0 {
 		arg.ExtendLease = true
 	}
 	var reply rpc_struct.HeartBeatReply
-	if err := utils.CallRPCServer(string(cs.MasterAddr), "MasterServer.RPCHeartBeatHandler", arg, &reply); err != nil {
+	reply.NetworkData = shared.NetworkData{
+		RoundRobinTrip: 0,
+		ForwardTrip: shared.TripInfo{
+			SentAt: time.Now(),
+		},
+		IpAddress: cs.ServerAddr,
+	}
+	if err := shared.UnicastToRPCServer(
+		string(cs.MasterAddr),
+		"MasterServer.RPCHeartBeatHandler",
+		arg, &reply); err != nil {
 		log.Err(err).Stack().Msg("cannot call MasterServer.RPCHeartBeatHandler")
 		return err
 	}
+	reply.NetworkData.BackwardTrip.RecievedAt = time.Now()
+	err := cs.failureDetector.Store(reply.NetworkData)
+	if err != nil {
+		log.Err(err).Stack().Msg("err storing network data for prediction")
+		return err
+	}
 	go func() {
-		utils.ForEach(reply.LeaseExtensions, func(lease *common.Lease) { cs.leases.PushBack(lease) })
+		utils.ForEach(reply.LeaseExtensions, func(lease *common.Lease) {
+			cs.leases.PushBack(lease)
+		})
 	}()
-	utils.ForEach(reply.Garbage, func(handle common.ChunkHandle) { cs.garbage.PushBack(handle) })
+	utils.ForEach(reply.Garbage, func(handle common.ChunkHandle) {
+		cs.garbage.PushBack(handle)
+	})
+
+	prediction, err := cs.failureDetector.Predict(string(cs.ServerAddr), 100)
+	if err != nil {
+		log.Err(err).Stack().Msg("")
+	}
+	log.Info().Msgf("server=%s prediction=%.2f  message=%s", cs.ServerAddr, prediction.Phil, prediction.Message)
 	return nil
 }
 
