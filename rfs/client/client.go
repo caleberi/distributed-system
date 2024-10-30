@@ -62,27 +62,31 @@ func (c *Client) Close() {
 	close(c.done)
 }
 
-func (c *Client) getLease(handle common.ChunkHandle, offset common.Offset) (*common.Lease, common.Offset, error) {
+func (c *Client) getLease(
+	handle common.ChunkHandle,
+	offset common.Offset) (*common.Lease, common.Offset, error) {
 	c.mu.RLock()
 	lease, ok := c.leaseCache[handle]
 	c.mu.RUnlock()
-	if !ok {
-		ls, err := c.GetChunkServers(handle)
-		if err != nil {
-			log.Err(err).Stack()
-			return nil, offset, common.Error{Code: common.UnknownError,
-				Err: "could not retrieve lease",
-			}
-		}
-		c.mu.Lock()
-		if ls.IsExpired(time.Now()) {
-			log.Info().Msgf("getLease = %v has expired before use", ls)
-		}
-		c.leaseCache[handle] = ls
-		c.mu.Unlock()
-		return ls, 0, nil
+	if ok {
+		return lease, 0, nil
 	}
-	return lease, 0, nil
+	ls, err := c.GetChunkServers(handle)
+	if err != nil {
+		log.Err(err).Stack()
+		return nil, offset, common.Error{
+			Code: common.UnknownError,
+			Err:  "could not retrieve lease",
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ls.IsExpired(time.Now()) {
+		log.Info().Msgf("getLease = %v has expired before use", ls)
+		return nil, 0, fmt.Errorf("getLease = %v has expired before use", ls)
+	}
+	c.leaseCache[handle] = ls
+	return ls, 0, nil
 }
 
 func (c *Client) GetChunkHandle(path common.Path, offset common.ChunkIndex) (common.ChunkHandle, error) {
