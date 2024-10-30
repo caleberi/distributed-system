@@ -24,7 +24,9 @@ type Client struct {
 	leaseCache   map[common.ChunkHandle]*common.Lease
 }
 
-func NewClient(addr common.ServerAddr, cacheTickerDuration time.Duration) *Client {
+func NewClient(
+	addr common.ServerAddr,
+	cacheTickerDuration time.Duration) *Client {
 	cl := &Client{
 		masterServer: addr,
 		mu:           sync.RWMutex{},
@@ -34,15 +36,17 @@ func NewClient(addr common.ServerAddr, cacheTickerDuration time.Duration) *Clien
 
 	go func() {
 		tick := time.NewTicker(cacheTickerDuration)
+		action := func(
+			handle common.ChunkHandle, lease *common.Lease) {
+			if lease.IsExpired(time.Now().Add(30 * time.Second)) {
+				delete(cl.leaseCache, lease.Handle)
+			}
+		}
 		for {
 			select {
 			case <-tick.C:
 				cl.mu.Lock()
-				for _, item := range cl.leaseCache {
-					if item.IsExpired(time.Now().Add(30 * time.Second)) {
-						delete(cl.leaseCache, item.Handle)
-					}
-				}
+				utils.IterateOverMap(cl.leaseCache, action)
 				cl.mu.Unlock()
 			case <-cl.done:
 				return
