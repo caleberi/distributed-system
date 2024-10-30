@@ -89,11 +89,13 @@ func (c *Client) getLease(
 	return ls, 0, nil
 }
 
-func (c *Client) GetChunkHandle(path common.Path, offset common.ChunkIndex) (common.ChunkHandle, error) {
+func (c *Client) GetChunkHandle(
+	path common.Path,
+	offset common.ChunkIndex) (common.ChunkHandle, error) {
 	var reply rpc_struct.GetChunkHandleReply
-	err := utils.CallRPCServer(
+	err := shared.UnicastToRPCServer(
 		string(c.masterServer),
-		"MasterServer.RPCGetChunkHandleHandler",
+		rpc_struct.MRPCGetChunkHandleHandler,
 		rpc_struct.GetChunkHandleArgs{
 			Path:  path,
 			Index: offset,
@@ -112,15 +114,16 @@ func (c *Client) GetChunkServers(handle common.ChunkHandle) (*common.Lease, erro
 
 	if !ok {
 		var info rpc_struct.PrimaryAndSecondaryServersInfoReply
-		err := utils.CallRPCServer(
+
+		if err := shared.UnicastToRPCServer(
 			string(c.masterServer),
-			"MasterServer.RPCGetPrimaryAndSecondaryServersInfoHandler",
+			rpc_struct.MRPCGetPrimaryAndSecondaryServersInfoHandler,
 			rpc_struct.PrimaryAndSecondaryServersInfoArg{Handle: handle},
 			&info,
-		)
-		if err != nil {
+		); err != nil {
 			return nil, err
 		}
+
 		nls := &common.Lease{
 			Handle:      handle,
 			Expire:      info.Expire,
@@ -130,12 +133,12 @@ func (c *Client) GetChunkServers(handle common.ChunkHandle) (*common.Lease, erro
 
 		if nls.IsExpired(time.Now()) {
 			log.Info().Msgf("GetChunkServers = %v has expired before use", nls)
+			return nil, fmt.Errorf("GetChunkServers = %v has expired before use", ls)
 		}
 		c.mu.Lock()
+		defer c.mu.Unlock()
 		c.leaseCache[handle] = nls
-		c.mu.Unlock()
-
-		return nls, nil
+		return c.leaseCache[handle], nil
 	}
 	return ls, nil
 }
