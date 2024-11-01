@@ -149,8 +149,9 @@ func (c *Client) List(path common.Path) ([]common.PathInfo, error) {
 		args   rpc_struct.GetPathInfoArgs
 		reply  rpc_struct.GetPathInfoReply
 	)
-	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCListHandler", args, &reply)
-	if err != nil {
+
+	if err := shared.UnicastToRPCServer(
+		string(c.masterServer), rpc_struct.MRPCListHandler, args, &reply); err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return nil, err
 	}
