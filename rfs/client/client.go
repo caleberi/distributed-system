@@ -166,8 +166,8 @@ func (c *Client) MkDir(path common.Path) error {
 		reply rpc_struct.MakeDirectoryReply
 	)
 	args.Path = path
-	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCMkdirHandler", args, &reply)
-	if err != nil {
+	if err := shared.UnicastToRPCServer(
+		string(c.masterServer), rpc_struct.MRPCMkdirHandler, args, &reply); err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return err
 	}
