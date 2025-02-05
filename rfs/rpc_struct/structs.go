@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/caleberi/distributed-system/rfs/common"
+	"github.com/caleberi/distributed-system/rfs/shared"
 )
 
 type HeartBeatArg struct {
@@ -16,6 +17,7 @@ type HeartBeatReply struct {
 	LastHeartBeat   time.Time
 	LeaseExtensions []*common.Lease
 	Garbage         []common.ChunkHandle
+	NetworkData     shared.NetworkData
 }
 
 type SysReportInfoArg struct{}
