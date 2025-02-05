@@ -38,16 +38,15 @@ func NewDBuffer(tick, expire time.Duration) *dbuffer {
 		for {
 			select {
 			case <-ticker.C:
-
-				utils.LoopOverMap(dbuf.buffer, func(key common.BufferId, item *bufferedItem) {
+				action := func(key common.BufferId, item *bufferedItem) {
 					if !item.expire.Before(time.Now()) {
 						return
 					}
 					dbuf.mu.Lock()
 					delete(dbuf.buffer, key)
 					dbuf.mu.Unlock()
-				})
-
+				}
+				utils.IterateOverMap(dbuf.buffer, action)
 			case <-dbuf.done:
 				log.Info().Msg("Closing download buffer")
 				ticker.Stop()
