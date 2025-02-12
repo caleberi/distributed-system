@@ -13,6 +13,7 @@ import (
 	chunkserver "github.com/caleberi/distributed-system/rfs/chunkserver"
 	"github.com/caleberi/distributed-system/rfs/common"
 	"github.com/caleberi/distributed-system/rfs/rpc_struct"
+	"github.com/caleberi/distributed-system/rfs/shared"
 	"github.com/caleberi/distributed-system/rfs/utils"
 	"github.com/rs/zerolog/log"
 )
@@ -24,9 +25,7 @@ type Client struct {
 	leaseCache   map[common.ChunkHandle]*common.Lease
 }
 
-func NewClient(
-	addr common.ServerAddr,
-	cacheTickerDuration time.Duration) *Client {
+func NewClient(addr common.ServerAddr, cacheTickerDuration time.Duration) *Client {
 	cl := &Client{
 		masterServer: addr,
 		mu:           sync.RWMutex{},
@@ -36,8 +35,7 @@ func NewClient(
 
 	go func() {
 		tick := time.NewTicker(cacheTickerDuration)
-		action := func(
-			handle common.ChunkHandle, lease *common.Lease) {
+		action := func(handle common.ChunkHandle, lease *common.Lease) {
 			if lease.IsExpired(time.Now().Add(30 * time.Second)) {
 				delete(cl.leaseCache, lease.Handle)
 			}
@@ -180,7 +178,10 @@ func (c *Client) CreateFile(path common.Path) error {
 		reply rpc_struct.CreateFileReply
 	)
 	args.Path = path
-	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCCreateFileHandler", args, &reply)
+	err := shared.UnicastToRPCServer(
+		string(c.masterServer),
+		rpc_struct.MRPCCreateFileHandler,
+		args, &reply)
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return err
@@ -194,7 +195,7 @@ func (c *Client) DeleteFile(path common.Path) error {
 		reply rpc_struct.DeleteFileReply
 	)
 	args.Path = path
-	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCDeleteFileHandler", args, &reply)
+	err := shared.UnicastToRPCServer(string(c.masterServer), rpc_struct.MRPCDeleteFileHandler, args, &reply)
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return err
@@ -209,7 +210,7 @@ func (c *Client) RenameFile(source, target common.Path) error {
 	)
 	args.Source = source
 	args.Target = target
-	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCRenameHandler", args, &reply)
+	err := shared.UnicastToRPCServer(string(c.masterServer), rpc_struct.MRPCRenameHandler, args, &reply)
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return err
@@ -223,7 +224,9 @@ func (c *Client) GetFile(path common.Path) (*common.FileInfo, error) {
 		reply rpc_struct.GetFileInfoReply
 	)
 	args.Path = path
-	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCGetFileInfoHandler", args, &reply)
+	err := shared.UnicastToRPCServer(
+		string(c.masterServer),
+		rpc_struct.MRPCGetFileInfoHandler, args, &reply)
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return nil, err
@@ -242,7 +245,8 @@ func (c *Client) Read(path common.Path, offset common.Offset, data []byte) (n in
 		reply rpc_struct.GetFileInfoReply
 	)
 	args.Path = path
-	err = utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCGetFileInfoHandler", args, &reply)
+	err = shared.UnicastToRPCServer(
+		string(c.masterServer), rpc_struct.MRPCGetFileInfoHandler, args, &reply)
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return
@@ -311,7 +315,10 @@ func (c *Client) ReadChunk(handle common.ChunkHandle, offset common.Offset, data
 		replicasReply rpc_struct.RetrieveReplicasReply
 	)
 	replicasArgs.Handle = handle
-	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCGetReplicasHandler", replicasArgs, &replicasReply)
+	err := shared.UnicastToRPCServer(
+		string(c.masterServer),
+		rpc_struct.MRPCGetReplicasHandler,
+		replicasArgs, &replicasReply)
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return 0, common.Error{Code: common.UnknownError, Err: err.Error()}
@@ -332,7 +339,11 @@ func (c *Client) ReadChunk(handle common.ChunkHandle, offset common.Offset, data
 	readChunkArg.Data = data
 	readChunkArg.Length = int64(readLength)
 	readChunkArg.Offset = offset
-	err = utils.CallRPCServer(string(chosenReadServer), "ChunkServer.RPCReadChunkHandler", readChunkArg, &readChunkReply)
+	err = shared.UnicastToRPCServer(
+		string(chosenReadServer),
+		rpc_struct.CRPCReadChunkHandler,
+		readChunkArg,
+		&readChunkReply)
 
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
@@ -354,7 +365,10 @@ func (c *Client) Write(path common.Path, offset common.Offset, data []byte) erro
 		reply rpc_struct.GetFileInfoReply
 	)
 	args.Path = path
-	err := utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCGetFileInfoHandler", args, &reply)
+	err := shared.UnicastToRPCServer(
+		string(c.masterServer),
+		rpc_struct.MRPCGetFileInfoHandler,
+		args, &reply)
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return err
@@ -433,8 +447,8 @@ func (c *Client) WriteChunk(handle common.ChunkHandle, offset common.Offset, dat
 		var d rpc_struct.ForwardDataReply
 		if addr != "" {
 			replicas := utils.Filter(servers, func(v common.ServerAddr) bool { return v != addr })
-			err = utils.CallRPCServer(string(addr),
-				"ChunkServer.RPCForwardDataHandler",
+			err = shared.UnicastToRPCServer(string(addr),
+				rpc_struct.CRPCForwardDataHandler,
 				rpc_struct.ForwardDataArgs{
 					DownloadBufferId: dataID,
 					Data:             data,
@@ -456,9 +470,9 @@ func (c *Client) WriteChunk(handle common.ChunkHandle, offset common.Offset, dat
 		Replicas:         servers,
 	}
 
-	return utils.CallRPCServer(
+	return shared.UnicastToRPCServer(
 		string(writeLease.Primary),
-		"ChunkServer.RPCWriteChunkHandler",
+		rpc_struct.CRPCWriteChunkHandler,
 		writeArgs,
 		&rpc_struct.WriteChunkReply{},
 	)
@@ -474,14 +488,14 @@ func (c *Client) Append(path common.Path, data []byte) (offset common.Offset, er
 		reply rpc_struct.GetFileInfoReply
 	)
 	args.Path = path
-	err = utils.CallRPCServer(string(c.masterServer), "MasterServer.RPCGetFileInfoHandler", args, &reply)
+	err = shared.UnicastToRPCServer(string(c.masterServer), "MasterServer.RPCGetFileInfoHandler", args, &reply)
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return
 	}
 
 	// use the last chunk we created on the master server since
-	// we are doing an append mutation
+	// we are doing an appended mutation
 	start := common.ChunkIndex(math.Max(float64(reply.Chunks-1), 0.0))
 	var (
 		handle      common.ChunkHandle
@@ -549,8 +563,8 @@ func (c *Client) AppendChunk(handle common.ChunkHandle, data []byte) (common.Off
 		var d rpc_struct.ForwardDataReply
 		if addr != "" {
 			replicas := utils.Filter(servers, func(v common.ServerAddr) bool { return v != addr })
-			err = utils.CallRPCServer(string(addr),
-				"ChunkServer.RPCForwardDataHandler",
+			err = shared.UnicastToRPCServer(string(addr),
+				rpc_struct.CRPCForwardDataHandler,
 				rpc_struct.ForwardDataArgs{
 					DownloadBufferId: dataID,
 					Data:             data,
@@ -572,9 +586,9 @@ func (c *Client) AppendChunk(handle common.ChunkHandle, data []byte) (common.Off
 	)
 	appendArgs.DownloadBufferId = dataID
 	appendArgs.Replicas = appendLease.Secondaries
-	err = utils.CallRPCServer(
+	err = shared.UnicastToRPCServer(
 		string(appendLease.Primary),
-		"ChunkServer.RPCAppendChunkHandler",
+		rpc_struct.CRPCAppendChunkHandler,
 		appendArgs, &appendReply)
 	if err != nil {
 		return -1, common.Error{Code: common.UnknownError, Err: err.Error()}
