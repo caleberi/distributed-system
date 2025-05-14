@@ -257,9 +257,9 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 	return cs
 }
 
-func (cs *ChunkServer) IsAlive() bool {
-	return !cs.isDead
-}
+//func (cs *ChunkServer) IsAlive() bool {
+//	return !cs.isDead
+//}
 
 func (cs *ChunkServer) archiveChunks() error {
 	chunksToArchive := map[common.ChunkHandle]*chunkInfo{}
@@ -448,9 +448,14 @@ func (cs *ChunkServer) persistMetadata() error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			log.Err(err).Stack()
+		}
+	}(file)
 
-	metadatas := []PersistedMetaData{}
+	var metadatas []PersistedMetaData
 
 	for handle, ch := range cs.chunks {
 		persistMetadata := PersistedMetaData{
@@ -686,7 +691,10 @@ func (cs *ChunkServer) RPCForwardDataHandler(args rpc_struct.ForwardDataArgs, re
 
 	replicaAddr := args.Replicas[0]
 	args.Replicas = args.Replicas[1:]
-	utils.CallRPCServer(string(replicaAddr), "ChunkServer.RPCForwardDataHandler", args, &reply)
+	err := shared.UnicastToRPCServer(string(replicaAddr), "ChunkServer.RPCForwardDataHandler", args, &reply)
+	if err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -788,7 +796,7 @@ func doWriteOperation(args rpc_struct.WriteChunkArgs, cs *ChunkServer, data []by
 		var applyMutationReply rpc_struct.ApplyMutationReply
 		utils.ForEach(args.Replicas, func(replicaAddr common.ServerAddr) {
 			log.Info().Msgf("forwarding data to replica (%v)", replicaAddr)
-			err := utils.CallRPCServer(
+			err := shared.UnicastToRPCServer(
 				string(replicaAddr),
 				"ChunkServer.RPCApplyMutationHandler",
 				rpc_struct.ApplyMutationArgs{
@@ -807,7 +815,7 @@ func doWriteOperation(args rpc_struct.WriteChunkArgs, cs *ChunkServer, data []by
 		close(errCh)
 	}()
 
-	errs := []string{}
+	var errs []string
 	for e := range errCh {
 		errs = append(errs, e.Error())
 	}
@@ -831,8 +839,8 @@ func (cs *ChunkServer) RPCApplyMutationHandler(args rpc_struct.ApplyMutationArgs
 			args.DownloadBufferId)
 	}
 
-	// calculate the next offset from the prevous cursor position
-	// assumption is that the data in the buffer is greated than 64 << 20
+	// calculate the next offset from the previous cursor position
+	// assumption is that the data in the buffer is greater than 64 << 20
 	dataSize := bToMb(uint64(args.Offset) + uint64(len(data)))
 	if dataSize > common.ChunkMaxSizeInMb {
 		return fmt.Errorf("provided data size for append action [%v] is larger than the max allowed data size of %v mb", args.DownloadBufferId, common.ChunkMaxSizeInMb)
@@ -900,7 +908,7 @@ func (cs *ChunkServer) RPCAppendChunkHandler(args rpc_struct.AppendChunkArgs, re
 		chInfo.length = common.ChunkMaxSizeInByte
 		reply.ErrorCode = common.AppendExceedChunkSize
 	} else {
-		chInfo.length = newLength
+		mutationType = common.MutationAppend
 	}
 
 	reply.Offset = offset
@@ -924,11 +932,11 @@ func (cs *ChunkServer) RPCAppendChunkHandler(args rpc_struct.AppendChunkArgs, re
 		Offset:           offset,
 	}
 
-	// forward a write call to secondary server
+	// forward a written call to secondary server
 	go func() {
 		utils.ForEach(args.Replicas, func(addr common.ServerAddr) {
 			var applyMutationReply rpc_struct.ApplyMutationReply
-			err := utils.CallRPCServer(string(addr), "ChunkServer.RPCApplyMutationHandler", applyMutationArgs, &applyMutationReply)
+			err := shared.UnicastToRPCServer(string(addr), "ChunkServer.RPCApplyMutationHandler", applyMutationArgs, &applyMutationReply)
 			if err != nil {
 				errs <- err
 			}
@@ -945,6 +953,7 @@ func (cs *ChunkServer) RPCAppendChunkHandler(args rpc_struct.AppendChunkArgs, re
 	if len(errArr) != 0 {
 		return errors.New(strings.Join(errArr, ";"))
 	}
+	chInfo.length = newLength
 	return nil
 }
 
@@ -964,7 +973,6 @@ func (cs *ChunkServer) RPCGetSnapshotHandler(args rpc_struct.GetSnapshotArgs, re
 	chInfo.RLock()
 	defer chInfo.RUnlock()
 
-	log.Printf("Server %v : Send copy of %v to %v", cs.ServerAddr, handle, args.Replicas)
 	data := make([]byte, chInfo.length)
 	_, err = cs.readChunk(handle, 0, data)
 	if err != nil {
@@ -972,22 +980,14 @@ func (cs *ChunkServer) RPCGetSnapshotHandler(args rpc_struct.GetSnapshotArgs, re
 	}
 
 	var r rpc_struct.ApplyCopyReply
-	for i := 0; i < len(args.Replicas); i++ {
-		replicaAddr := args.Replicas[i]
-		client, err := rpc.Dial("tcp", string(replicaAddr))
-		if err != nil {
-			return err
-		}
-		applyCopyArgs := rpc_struct.ApplyCopyArgs{Handle: handle, Data: data, Version: chInfo.version}
-		log.Printf("forwarding data to replica (%v)", replicaAddr)
-		err = client.Call("ChunkServer.RPCApplyCopyHandler", applyCopyArgs, &r)
-		if err != nil {
-			return err
-		}
+
+	applyCopyArgs := rpc_struct.ApplyCopyArgs{
+		Handle:  handle,
+		Data:    data,
+		Version: chInfo.version,
 	}
 
-	return nil
-
+	return shared.UnicastToRPCServer(string(args.Replicas), "ChunkServer.RPCApplyCopyHandler", applyCopyArgs, &r)
 }
 
 func (cs *ChunkServer) RPCApplyCopyHandler(args rpc_struct.ApplyCopyArgs, reply *rpc_struct.AppendChunkReply) error {
@@ -1005,8 +1005,6 @@ func (cs *ChunkServer) RPCApplyCopyHandler(args rpc_struct.ApplyCopyArgs, reply 
 
 	chInfo.Lock()
 	defer chInfo.Unlock()
-
-	log.Printf("Server %v : Apply copy of %v", cs.ServerAddr, handle)
 
 	chInfo.version = args.Version
 	err = cs.writeChunk(handle, args.Data, common.MutationWrite, 0, true)
@@ -1070,7 +1068,12 @@ func (cs *ChunkServer) writeChunk(handle common.ChunkHandle, data []byte, mutati
 	if err != nil {
 		return err
 	}
-	defer fs.Close()
+	defer func(fs *os.File) {
+		err := fs.Close()
+		if err != nil {
+			log.Err(err).Stack()
+		}
+	}(fs)
 	n, err := fs.WriteAt(data, int64(offset))
 	if err != nil {
 		log.Info().Msgf("error occurred while writing from %v from offset %v", chInfo, offset)
@@ -1101,7 +1104,12 @@ func (cs *ChunkServer) readChunk(handle common.ChunkHandle, offset common.Offset
 		log.Err(err).Stack().Send()
 		return -1, err
 	}
-	defer f.Close()
+	defer func(fs *os.File) {
+		err := fs.Close()
+		if err != nil {
+			log.Err(err).Stack()
+		}
+	}(f)
 	log.Printf(
 		"Server %v reading data from offset %v for chunk handle [%v] - %s",
 		cs.ServerAddr, offset, handle, filename)
