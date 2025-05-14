@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"net/rpc"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/caleberi/distributed-system/rfs/common"
 	filesystem "github.com/caleberi/distributed-system/rfs/fs"
 	"github.com/caleberi/distributed-system/rfs/rpc_struct"
+	"github.com/caleberi/distributed-system/rfs/shared"
 	"github.com/caleberi/distributed-system/rfs/utils"
 	"github.com/rs/zerolog/log"
 )
@@ -185,6 +187,7 @@ func (ma *MasterServer) serverHeartBeat() error {
 		}
 	}
 
+	//  deadserver have nothing to do with the replication logic
 	handles := ma.chunkServerManager.getReplicationMigrationList()
 	log.Info().Msg(fmt.Sprintf("MasterServer : Replication needed for handles - %v", handles))
 	for i := 0; i < len(handles); i++ {
@@ -210,6 +213,7 @@ func (ma *MasterServer) serverHeartBeat() error {
 
 func (ma *MasterServer) performReplication(handle common.ChunkHandle) error {
 	from, to, err := ma.chunkServerManager.chooseReplicationServer(handle)
+	log.Info().Msgf(">>> Moving handle[%v] from %s to %s", handle, from, to)
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
 		return err
@@ -218,18 +222,19 @@ func (ma *MasterServer) performReplication(handle common.ChunkHandle) error {
 	log.Warn().Msg(fmt.Sprintf("allocate new chunk %v from %v to %v", handle, from, to))
 
 	var cr rpc_struct.CreateChunkReply
-	err = utils.CallRPCServer(string(to), "ChunkServer.RPCCreateChunkHandler", rpc_struct.CreateChunkArgs{Handle: handle}, &cr)
+	err = shared.UnicastToRPCServer(string(to), "ChunkServer.RPCCreateChunkHandler", rpc_struct.CreateChunkArgs{Handle: handle}, &cr)
 	if err != nil {
 		return err
 	}
 
+	// CONTINUE FROM HERE  LATER
 	var sr rpc_struct.GetSnapshotReply
-	err = utils.CallRPCServer(string(from), "ChunkServer.RPCGetSnapshotHandler", rpc_struct.GetSnapshotArgs{Handle: handle, Replicas: to}, &sr)
+	err = shared.UnicastToRPCServer(string(from), "ChunkServer.RPCGetSnapshotHandler", rpc_struct.GetSnapshotArgs{Handle: handle, Replicas: to}, &sr)
 	if err != nil {
 		return err
 	}
 
-	err = ma.chunkServerManager.registerReplicas(handle, to, false)
+	err = ma.chunkServerManager.registerReplicas(handle, to, true)
 	if err != nil {
 		return err
 	}
@@ -333,6 +338,9 @@ func (ma *MasterServer) persistMetaData() error {
 // /////////////////////////////////
 func (ma *MasterServer) RPCHeartBeatHandler(args rpc_struct.HeartBeatArg, reply *rpc_struct.HeartBeatReply) error {
 	firstHeartBeat := ma.chunkServerManager.HeartBeat(args.Address, args.MachineInfo, reply)
+	time.Sleep(time.Duration(rand.Intn(10)) * time.Second) // to mimic downtime
+	reply.NetworkData.ForwardTrip.RecievedAt = time.Now()
+	defer func() { reply.NetworkData.BackwardTrip.SentAt = time.Now() }()
 
 	if args.ExtendLease {
 		var newLeases []*common.Lease
@@ -358,7 +366,7 @@ func (ma *MasterServer) RPCHeartBeatHandler(args rpc_struct.HeartBeatArg, reply 
 	if firstHeartBeat {
 		systemReportArg := rpc_struct.SysReportInfoArg{}
 		systemReportReply := rpc_struct.SysReportInfoReply{}
-		err := utils.CallRPCServer(string(args.Address), "ChunkServer.RPCSysReportHandler", systemReportArg, &systemReportReply)
+		err := shared.UnicastToRPCServer(string(args.Address), "ChunkServer.RPCSysReportHandler", systemReportArg, &systemReportReply)
 		if err != nil {
 			log.Err(err).Stack().Msg(err.Error())
 			return err
@@ -389,7 +397,7 @@ func (ma *MasterServer) RPCHeartBeatHandler(args rpc_struct.HeartBeatArg, reply 
 					chunkVersionArg.Version = chunkInfo.Version
 
 					if chk.primary != "" {
-						err := utils.CallRPCServer(
+						err := shared.UnicastToRPCServer(
 							string(chk.primary),
 							"ChunkServer.RPCCheckChunkVersionHandler",
 							chunkVersionArg, &chunkVersionReply)
@@ -400,20 +408,21 @@ func (ma *MasterServer) RPCHeartBeatHandler(args rpc_struct.HeartBeatArg, reply 
 						if chunkVersionReply.Stale {
 							log.Info().Msg(fmt.Sprintf("=> requesting chunkserver %v to record as garbage since chunk is stale", args.Address))
 							reply.Garbage = append(reply.Garbage, chunkInfo.Handle)
+							continue
 						}
 					} else {
 						log.Info().Msg("Missing chunk primary server so version verification failed")
 						if len(chk.locations) != 0 {
 							reply.Garbage = append(reply.Garbage, chunkInfo.Handle)
+							continue
 						}
 					}
-				} else {
-					if err := ma.chunkServerManager.registerReplicas(chunkInfo.Handle, args.Address, false); err != nil {
-						log.Err(err).Stack().Msg(err.Error())
-					}
-					ma.chunkServerManager.addChunk([]common.ServerAddr{args.Address}, chunkInfo.Handle)
-					log.Info().Msgf("replication after first ping %v", ma.chunkServerManager.getReplicationMigrationList())
 				}
+				if err := ma.chunkServerManager.registerReplicas(chunkInfo.Handle, args.Address, false); err != nil {
+					log.Err(err).Stack().Msg(err.Error())
+				}
+				ma.chunkServerManager.addChunk([]common.ServerAddr{args.Address}, chunkInfo.Handle)
+				log.Info().Msgf("replication after first ping %v", ma.chunkServerManager.getReplicationMigrationList())
 			}
 		}
 	} else {
@@ -445,7 +454,7 @@ func (ma *MasterServer) RPCGetChunkHandleHandler(
 	args rpc_struct.GetChunkHandleArgs,
 	reply *rpc_struct.GetChunkHandleReply) error {
 	dirpath, filename := ma.namespaceManager.retrievePartitionFromPath(args.Path)
-	_, err := utils.ValidateFilenameStr(filename, args.Path)
+	_, err := validateFilenameStr(filename, args.Path)
 	if err != nil {
 		return err
 	}
@@ -593,4 +602,14 @@ func (ma *MasterServer) RPCGetReplicasHandler(
 		reply.Locations = append(reply.Locations, v)
 	})
 	return nil
+}
+
+func validateFilenameStr(filename string, p common.Path) (bool, error) {
+	switch filename {
+	case "", ".", "..":
+		return true, fmt.Errorf("path %s does not have a base file", p)
+	default:
+		break
+	}
+	return false, nil
 }
