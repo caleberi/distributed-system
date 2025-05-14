@@ -11,6 +11,7 @@ import (
 
 	"github.com/caleberi/distributed-system/rfs/common"
 	"github.com/caleberi/distributed-system/rfs/rpc_struct"
+	"github.com/caleberi/distributed-system/rfs/shared"
 	"github.com/caleberi/distributed-system/rfs/utils"
 	"github.com/rs/zerolog/log"
 )
@@ -74,8 +75,9 @@ func (csm *CSManager) registerReplicas(handle common.ChunkHandle, addr common.Se
 		chunkInfo, ok = csm.chunks[handle]
 		csm.chunkMutex.RUnlock()
 
-		csm.Lock()
-		defer csm.Unlock()
+		//  not necessary since the chunk has been locked outside
+		// csm.Lock()
+		// defer csm.Unlock()
 	} else {
 		csm.Lock()
 		defer csm.Unlock()
@@ -102,8 +104,9 @@ func (csm *CSManager) detectDeadServer() []common.ServerAddr {
 		}
 	}
 
-	log.Print("===== DEAD SERVERS =====")
+	log.Print("===== DEAD SERVERS =====\n")
 	utils.ForEach(ret, func(v common.ServerAddr) { log.Printf(">. %v", v) })
+	log.Print("===== DEAD SERVERS =====\n")
 	return ret
 }
 
@@ -157,11 +160,8 @@ func (csm *CSManager) removeServer(addr common.ServerAddr) ([]common.ChunkHandle
 	}
 
 	var handles []common.ChunkHandle
-	for handle, ok := range chk.chunks {
-		if ok {
-			handles = append(handles, handle)
-		}
-	}
+	utils.LoopOverMap(chk.chunks, func(handle common.ChunkHandle, _ bool) { handles = append(handles, handle) })
+
 	delete(csm.servers, addr)
 	return handles, nil
 }
@@ -270,7 +270,7 @@ func (csm *CSManager) getLeaseHolder(handle common.ChunkHandle) (*common.Lease, 
 
 				var reply rpc_struct.CheckChunkVersionReply
 
-				err := utils.CallRPCServer(string(addr), "ChunkServer.RPCCheckChunkVersionHandler", arg, &reply)
+				err := shared.UnicastToRPCServer(string(addr), "ChunkServer.RPCCheckChunkVersionHandler", arg, &reply)
 				lock.Lock()
 				defer lock.Unlock()
 				if err != nil || reply.Stale {
@@ -319,7 +319,7 @@ func (csm *CSManager) getLeaseHolder(handle common.ChunkHandle) (*common.Lease, 
 		args.Primary = lease.Primary
 		args.Secondaries = lease.Secondaries
 		args.Handle = lease.Handle
-		err := utils.CallRPCServer(string(lease.Primary), "ChunkServer.RPCGrantLeaseHandler", args, &reply)
+		err := shared.UnicastToRPCServer(string(lease.Primary), "ChunkServer.RPCGrantLeaseHandler", args, &reply)
 		if err != nil {
 			log.Err(err).Stack().Send()
 			log.Warn().Msg(fmt.Sprintf("could not grant lease to primary = %v", chk.primary))
@@ -408,7 +408,7 @@ func (csm *CSManager) createChunk(path common.Path, addrs []common.ServerAddr) (
 
 	utils.ForEach(addrs, func(addr common.ServerAddr) {
 		var reply rpc_struct.CreateChunkReply
-		err := utils.CallRPCServer(string(addr), "ChunkServer.RPCCreateChunkHandler", args, &reply)
+		err := shared.UnicastToRPCServer(string(addr), "ChunkServer.RPCCreateChunkHandler", args, &reply)
 		if err != nil {
 			errs = append(errs, err.Error())
 		} else {
