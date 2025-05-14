@@ -221,7 +221,7 @@ func (nm *namespaceManager) Create(p common.Path) error {
 		dirpath  string
 	)
 	dirpath, filename = nm.retrievePartitionFromPath(p)
-	_, err := utils.ValidateFilenameStr(filename, p)
+	_, err := validateFilenameStr(filename, p)
 	if err != nil {
 		return err
 	}
@@ -246,7 +246,7 @@ func (nm *namespaceManager) Delete(p common.Path) error {
 		dirpath  string
 	)
 	dirpath, filename = nm.retrievePartitionFromPath(p)
-	_, err := utils.ValidateFilenameStr(filename, p)
+	_, err := validateFilenameStr(filename, p)
 	if err != nil {
 		return err
 	}
