@@ -97,11 +97,15 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 	machineInfo.Hostname = hostname
 	machineInfo.RoundTripProximityTime = calculateRoundTripProximity(15, string(masterAddr))
 
-	failureDetector, err := shared.NewFailureDetector("127.0.0.1:6379", 2, 5*time.Minute, shared.SuspicionLevel{
-		AccruementThreshold: 70,
-		UpperBoundThreshold: 30,
-		ResetThreshold:      15,
-	})
+	failureDetector, err := shared.NewFailureDetector(
+		string(masterAddr),
+		"127.0.0.1:6379", 2,
+		5*time.Minute,
+		shared.SuspicionLevel{
+			AccruementThreshold: 70,
+			UpperBoundThreshold: 30,
+			ResetThreshold:      15,
+		})
 	if err != nil {
 		log.Fatal().Msg("failure detector could not be started\n")
 	}
@@ -403,11 +407,10 @@ func (cs *ChunkServer) heartBeat() error {
 	}
 	var reply rpc_struct.HeartBeatReply
 	reply.NetworkData = shared.NetworkData{
-		RoundRobinTrip: 0,
+		RoundTrip: 0,
 		ForwardTrip: shared.TripInfo{
 			SentAt: time.Now(),
 		},
-		IpAddress: cs.ServerAddr,
 	}
 	if err := shared.UnicastToRPCServer(
 		string(cs.MasterAddr),
@@ -417,7 +420,7 @@ func (cs *ChunkServer) heartBeat() error {
 		return err
 	}
 	reply.NetworkData.BackwardTrip.RecievedAt = time.Now()
-	err := cs.failureDetector.Store(reply.NetworkData)
+	err := cs.failureDetector.RecordSample(reply.NetworkData)
 	if err != nil {
 		log.Err(err).Stack().Msg("err storing network data for prediction")
 		return err
@@ -431,11 +434,11 @@ func (cs *ChunkServer) heartBeat() error {
 		cs.garbage.PushBack(handle)
 	})
 
-	prediction, err := cs.failureDetector.Predict(string(cs.ServerAddr), 100)
+	prediction, err := cs.failureDetector.PredictFailure(100)
 	if err != nil {
 		log.Err(err).Stack().Msg("")
 	}
-	log.Info().Msgf("server=%s prediction=%.2f  message=%s", cs.ServerAddr, prediction.Phil, prediction.Message)
+	log.Info().Msgf("server=%s prediction=%.2f  message=%s", cs.ServerAddr, prediction.Phi, prediction.Message)
 	return nil
 }
 
