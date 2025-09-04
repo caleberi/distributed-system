@@ -339,7 +339,7 @@ func (ma *MasterServer) persistMetaData() error {
 func (ma *MasterServer) RPCHeartBeatHandler(args rpc_struct.HeartBeatArg, reply *rpc_struct.HeartBeatReply) error {
 	firstHeartBeat := ma.chunkServerManager.HeartBeat(args.Address, args.MachineInfo, reply)
 	time.Sleep(time.Duration(rand.Intn(10)) * time.Second) // to mimic downtime
-	reply.NetworkData.ForwardTrip.RecievedAt = time.Now()
+	reply.NetworkData.ForwardTrip.ReceivedAt = time.Now()
 	defer func() { reply.NetworkData.BackwardTrip.SentAt = time.Now() }()
 
 	if args.ExtendLease {

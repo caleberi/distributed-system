@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 
 	"github.com/caleberi/distributed-system/rfs/common"
@@ -98,13 +99,12 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 	machineInfo.RoundTripProximityTime = calculateRoundTripProximity(15, string(masterAddr))
 
 	failureDetector, err := shared.NewFailureDetector(
-		string(masterAddr),
-		"127.0.0.1:6379", 2,
+		string(masterAddr), 2,
+		&redis.Options{Addr: "localhost:6379"},
 		5*time.Minute,
 		shared.SuspicionLevel{
 			AccruementThreshold: 70,
 			UpperBoundThreshold: 30,
-			ResetThreshold:      15,
 		})
 	if err != nil {
 		log.Fatal().Msg("failure detector could not be started\n")
@@ -419,7 +419,7 @@ func (cs *ChunkServer) heartBeat() error {
 		log.Err(err).Stack().Msg("cannot call MasterServer.RPCHeartBeatHandler")
 		return err
 	}
-	reply.NetworkData.BackwardTrip.RecievedAt = time.Now()
+	reply.NetworkData.BackwardTrip.ReceivedAt = time.Now()
 	err := cs.failureDetector.RecordSample(reply.NetworkData)
 	if err != nil {
 		log.Err(err).Stack().Msg("err storing network data for prediction")
@@ -434,7 +434,7 @@ func (cs *ChunkServer) heartBeat() error {
 		cs.garbage.PushBack(handle)
 	})
 
-	prediction, err := cs.failureDetector.PredictFailure(100)
+	prediction, err := cs.failureDetector.PredictFailure()
 	if err != nil {
 		log.Err(err).Stack().Msg("")
 	}
