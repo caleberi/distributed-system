@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	chunkserver "github.com/caleberi/distributed-system/rfs/chunkserver"
 	"github.com/caleberi/distributed-system/rfs/common"
+	downloadbuffer "github.com/caleberi/distributed-system/rfs/download_buffer"
 	"github.com/caleberi/distributed-system/rfs/rpc_struct"
 	"github.com/caleberi/distributed-system/rfs/shared"
 	"github.com/caleberi/distributed-system/rfs/utils"
@@ -439,7 +439,7 @@ func (c *Client) WriteChunk(handle common.ChunkHandle, offset common.Offset, dat
 	}
 
 	log.Info().Msgf("Servers from the lease = %v", servers)
-	dataID := chunkserver.NewDBufferId(handle)
+	dataID := downloadbuffer.NewDownloadBufferId(handle)
 
 	var errs []string
 	log.Info().Msgf("RPCForwardDataHandler = %v", servers)
@@ -556,7 +556,7 @@ func (c *Client) AppendChunk(handle common.ChunkHandle, data []byte) (common.Off
 		return offset, common.Error{Code: common.UnknownError, Err: "no replica"}
 	}
 
-	dataID := chunkserver.NewDBufferId(handle)
+	dataID := downloadbuffer.NewDownloadBufferId(handle)
 	var errs []string
 	log.Info().Msgf("RPCForwardDataHandler = %v", servers)
 	utils.ForEach(servers, func(addr common.ServerAddr) {

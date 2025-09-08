@@ -43,7 +43,7 @@ type PathInfo struct {
 
 type BufferId struct {
 	Handle    ChunkHandle
-	Timestamp int
+	Timestamp int64
 }
 
 type MachineInfo struct {

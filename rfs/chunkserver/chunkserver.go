@@ -24,6 +24,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/caleberi/distributed-system/rfs/common"
+	downloadbuffer "github.com/caleberi/distributed-system/rfs/download_buffer"
 	filesystem "github.com/caleberi/distributed-system/rfs/file_system"
 	"github.com/caleberi/distributed-system/rfs/rpc_struct"
 	"github.com/caleberi/distributed-system/rfs/shared"
@@ -55,7 +56,7 @@ type ChunkServer struct {
 	failureDetector *shared.FailureDetector
 	rootDir         *filesystem.FileSystem
 	mu              sync.RWMutex
-	downloadBuffer  *dbuffer
+	downloadBuffer  *downloadbuffer.DownloadBuffer
 	archiver        *common.Archiver
 	leases          utils.Deque[*common.Lease]
 	// leasesUnderMutation map[*common.Lease]bool
@@ -111,6 +112,14 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 	}
 
 	fs := filesystem.NewFileSystem(root)
+	dbuffer, err := downloadbuffer.NewDownloadBuffer(
+		common.DownloadBufferTick,
+		common.DownloadBufferItemExpire,
+	)
+	if err != nil {
+		log.Fatal().Msg("download buffer could not be started\n")
+	}
+
 	cs := &ChunkServer{
 		ServerAddr:         serverAddr,
 		MasterAddr:         masterAddr,
@@ -124,10 +133,7 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 		isDead:             false,
 		archiver:           common.NewArchiver(fs),
 		failureDetector:    failureDetector,
-		downloadBuffer: NewDBuffer(
-			common.DownloadBufferTick,
-			common.DownloadBufferItemExpire,
-		),
+		downloadBuffer:     dbuffer,
 	}
 
 	rpc := rpc.NewServer()
