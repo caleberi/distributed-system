@@ -24,7 +24,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/caleberi/distributed-system/rfs/common"
-	filesystem "github.com/caleberi/distributed-system/rfs/fs"
+	filesystem "github.com/caleberi/distributed-system/rfs/file_system"
 	"github.com/caleberi/distributed-system/rfs/rpc_struct"
 	"github.com/caleberi/distributed-system/rfs/shared"
 	"github.com/caleberi/distributed-system/rfs/utils"
