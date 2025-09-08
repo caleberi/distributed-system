@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	filesystem "github.com/caleberi/distributed-system/rfs/fs"
+	filesystem "github.com/caleberi/distributed-system/rfs/file_system"
 )
 
 var (
