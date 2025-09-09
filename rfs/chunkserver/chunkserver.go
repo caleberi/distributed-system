@@ -23,6 +23,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 
+	archivemanager "github.com/caleberi/distributed-system/rfs/archive_manager"
 	"github.com/caleberi/distributed-system/rfs/common"
 	downloadbuffer "github.com/caleberi/distributed-system/rfs/download_buffer"
 	filesystem "github.com/caleberi/distributed-system/rfs/file_system"
@@ -57,7 +58,7 @@ type ChunkServer struct {
 	rootDir         *filesystem.FileSystem
 	mu              sync.RWMutex
 	downloadBuffer  *downloadbuffer.DownloadBuffer
-	archiver        *common.Archiver
+	archiver        *archivemanager.ArchiverManager
 	leases          utils.Deque[*common.Lease]
 	// leasesUnderMutation map[*common.Lease]bool
 	failureDetectionCh chan string
@@ -131,7 +132,7 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 		failureDetectionCh: make(chan string),
 		garbage:            utils.Deque[common.ChunkHandle]{},
 		isDead:             false,
-		archiver:           common.NewArchiver(fs),
+		archiver:           archivemanager.NewArchiver(fs, 2),
 		failureDetector:    failureDetector,
 		downloadBuffer:     dbuffer,
 	}
@@ -333,7 +334,7 @@ func (cs *ChunkServer) decompressCompressedChunk(handle common.ChunkHandle) erro
 	}
 
 	if chunkInfo.isCompressed {
-		filename := fmt.Sprintf(common.ChunkFileNameFormat+common.ZIP_EXT, handle)
+		filename := fmt.Sprintf(common.ChunkFileNameFormat+archivemanager.ZIP_EXT, handle)
 		cs.archiver.DecompressPipeline.Task <- common.Path(filename)
 		result := <-cs.archiver.DecompressPipeline.Result
 		if result.Err != nil {
@@ -511,7 +512,7 @@ func (cs *ChunkServer) deleteChunk(handle common.ChunkHandle) error {
 	if err == nil {
 		return nil
 	}
-	return cs.rootDir.RemoveFile(fmt.Sprintf(common.ChunkFileNameFormat, handle) + common.ZIP_EXT)
+	return cs.rootDir.RemoveFile(fmt.Sprintf(common.ChunkFileNameFormat, handle) + archivemanager.ZIP_EXT)
 }
 
 func (cs *ChunkServer) Shutdown() {
