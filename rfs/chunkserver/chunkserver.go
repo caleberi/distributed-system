@@ -275,55 +275,71 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 	return cs, nil
 }
 
+// archiveChunks compresses chunks that have not been accessed within the archival time span.
+// It identifies eligible chunks, submits them for compression, and updates their status concurrently.
+// Errors encountered during compression are aggregated and returned as a single error.
+// The function is thread-safe and ensures proper resource cleanup.
+//
+// Returns nil if all chunks are processed successfully, or a combined error if any failures occur.
 func (cs *Server) archiveChunks() error {
 	chunksToArchive := map[common.ChunkHandle]*chunkInfo{}
+	checkAccessTime := func(value *chunkInfo) bool {
+		return time.Until(value.accessTime).Hours()/24 > common.ArchivalDaySpan
+	}
 	cs.mu.Lock()
-	utils.ExtractFromMap(
-		cs.chunks,
-		chunksToArchive,
-		func(value *chunkInfo) bool {
-			return time.Until(value.accessTime).Hours()/24 > common.ArchivalDaySpan
-		},
-	)
+	utils.ExtractFromMap(cs.chunks, chunksToArchive, checkAccessTime)
 	cs.mu.Unlock()
 
-	numberOfCompressionOps := len(chunksToArchive)
-	pathCompressionMap := make(map[common.Path]*chunkInfo)
-	var (
-		wg sync.WaitGroup
-		mu sync.Mutex
-	)
+	var wg sync.WaitGroup
+	var errWg sync.WaitGroup
+	pathToHandle := make(map[common.Path]common.ChunkHandle)
+	errCh := make(chan error, len(chunksToArchive))
+	errs := []error{}
+
+	errWg.Add(1)
+	go func() {
+		defer errWg.Done()
+		for err := range errCh {
+			errs = append(errs, err)
+		}
+	}()
 
 	wg.Add(2)
-
-	go func() {
+	go func(errs chan<- error) {
 		defer wg.Done()
-		for handle, chkInfo := range chunksToArchive {
-			filename := fmt.Sprintf(common.ChunkFileNameFormat, handle)
-			fpath := common.Path(filename)
-			cs.archiver.CompressPipeline.Task <- fpath
-			mu.Lock()
-			pathCompressionMap[fpath] = chkInfo
-			mu.Unlock()
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		for i := 0; i < numberOfCompressionOps; i++ {
-			result := <-cs.archiver.CompressPipeline.Result
-			if result.Err != nil {
-				log.Err(result.Err).Stack().Msg(string(result.Path) + " : " + result.Err.Error())
+		for handle := range chunksToArchive {
+			filename := common.Path(fmt.Sprintf(common.ChunkFileNameFormat, handle))
+			if err := cs.archiver.SubmitCompress(filename); err != nil {
+				errs <- err
 				continue
 			}
-			mu.Lock()
-			pathCompressionMap[result.Path].isCompressed = true
-			mu.Unlock()
-			log.Info().Msg(fmt.Sprintf("Compression Action Successfully [%v]\n", result.Path))
+			pathToHandle[filename] = handle
 		}
-	}()
-	wg.Wait()
+	}(errCh)
 
+	go func(errs chan<- error) {
+		defer wg.Done()
+		for result := range cs.archiver.CompressPipeline.Result {
+			if result.Err != nil {
+				errs <- result.Err
+				continue
+			}
+			cs.mu.Lock()
+			filename := strings.TrimSuffix(string(result.Path), archivemanager.ZIP_EXT)
+			if handle, exists := pathToHandle[common.Path(filename)]; exists {
+				cs.chunks[handle].isCompressed = true
+			}
+			cs.mu.Unlock()
+		}
+	}(errCh)
+
+	wg.Wait()
+	close(errCh)
+	errWg.Wait()
+
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
 	return nil
 }
 
