@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -32,7 +33,10 @@ func main() {
 		<-quit
 		masterserver.Shutdown()
 	} else {
-		chunkserver := chunkserver.NewChunkServer(common.ServerAddr(*addr), common.ServerAddr(*maddr), *rootFs)
+		chunkserver, err := chunkserver.NewChunkServer(common.ServerAddr(*addr), common.ServerAddr(*maddr), *rootFs)
+		if err != nil {
+			log.Fatal(err)
+		}
 		<-quit
 		chunkserver.Shutdown()
 	}
