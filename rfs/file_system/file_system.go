@@ -130,7 +130,7 @@ func (fs *FileSystem) GetStat(path string) (fs.FileInfo, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("path %s does not exist", path)
+			return nil, err
 		}
 		return nil, err
 	}
@@ -238,7 +238,7 @@ func (fs *FileSystem) GetFile(path string, flag int, mode os.FileMode) (*os.File
 		return nil, err
 	}
 
-	if !info.Mode().IsRegular() {
+	if info.Mode().IsDir() {
 		return nil, fmt.Errorf("%s is not a file", path)
 	}
 
