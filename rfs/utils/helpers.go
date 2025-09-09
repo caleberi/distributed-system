@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/rand"
+
+	"github.com/caleberi/distributed-system/rfs/common"
 )
 
 func Map[T, V comparable](data []T, fn func(v T) V) []V {
@@ -166,4 +168,14 @@ func ComputeChecksum(content string) string {
 	hash.Write([]byte(content))
 	checksum := hash.Sum(nil)
 	return hex.EncodeToString(checksum)
+}
+
+func ValidateFilenameStr(filename string, p common.Path) (bool, error) {
+	switch filename {
+	case "", ".", "..":
+		return true, fmt.Errorf("path %s does not have a base file", p)
+	default:
+		break
+	}
+	return false, nil
 }
