@@ -1,6 +1,7 @@
 package master_server
 
 import (
+	"context"
 	"encoding/gob"
 	"errors"
 	"fmt"
@@ -71,11 +72,11 @@ type MasterServer struct {
 	shutdownChan       chan os.Signal
 }
 
-func NewMasterServer(serverAddress common.ServerAddr, root string) *MasterServer {
+func NewMasterServer(ctx context.Context, serverAddress common.ServerAddr, root string) *MasterServer {
 	ma := &MasterServer{
 		ServerAddr:         serverAddress,
 		rootDir:            filesystem.NewFileSystem(root),
-		namespaceManager:   namespacemanager.NewNameSpaceManager(10 * time.Hour),
+		namespaceManager:   namespacemanager.NewNameSpaceManager(ctx, 10*time.Hour),
 		chunkServerManager: NewCSManager(),
 		shutdownChan:       make(chan os.Signal, 1),
 	}

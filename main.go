@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 	"os/signal"
@@ -8,7 +9,7 @@ import (
 
 	chunkserver "github.com/caleberi/distributed-system/rfs/chunkserver"
 	"github.com/caleberi/distributed-system/rfs/common"
-	masterserver "github.com/caleberi/distributed-system/rfs/master"
+	masterserver "github.com/caleberi/distributed-system/rfs/master_server"
 	"github.com/rs/zerolog"
 )
 
@@ -27,7 +28,7 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	if *master {
-		masterserver := masterserver.NewMasterServer(common.ServerAddr(*maddr), "./mroot")
+		masterserver := masterserver.NewMasterServer(context.Background(), common.ServerAddr(*maddr), "./mroot")
 		<-quit
 		masterserver.Shutdown()
 	} else {
