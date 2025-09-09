@@ -33,73 +33,106 @@ import (
 	"github.com/caleberi/distributed-system/rfs/utils"
 )
 
+// chunkInfo represents metadata for a chunk of data in a distributed file system.
+// It tracks versioning, mutation operations, and status flags for data integrity
+// and synchronization purposes.
 type chunkInfo struct {
-	sync.RWMutex                                         // handling lock during mutation ops
-	length       common.Offset                           // last know offed of this chunk
-	mutations    map[common.ChunkVersion]common.Mutation // all necessary mutation to be committed for this chuck to FS
-	checksum     common.Checksum                         // tracking data corruption
-	version      common.ChunkVersion                     // latest version for data reconciliation (current version) probably
-	isCompressed bool                                    // compression check flag
-	completed    bool                                    // check if mutation was ever marked done
-	abandoned    bool                                    // check if mutation was ever marked abandoned
-	creationTime time.Time                               // creation time of the chunk
-	lastModified time.Time                               // last modified time of the chunk
-	accessTime   time.Time                               // last access time of the chunk
-	replication  int
-	serverStatus int
+	sync.RWMutex // handling lock during mutation ops
+
+	length   common.Offset       // last known offset of this chunk
+	checksum common.Checksum     // tracking data corruption
+	version  common.ChunkVersion // latest version for data reconciliation (current version)
+
+	completed    bool // indicates if mutation was ever marked done
+	abandoned    bool // indicates if mutation was ever marked abandoned
+	isCompressed bool // indicates if the chunk is compressed
+
+	replication  int // number of replicas for this chunk
+	serverStatus int // status of the server hosting this chunk
+
+	creationTime time.Time // creation time of the chunk
+	lastModified time.Time // last modified time of the chunk
+	accessTime   time.Time // last access time of the chunk
+
+	mutations map[common.ChunkVersion]common.Mutation // all necessary mutations to be committed for this chunk to FS
 }
 
-type ChunkServer struct {
-	ServerAddr  common.ServerAddr
-	MasterAddr  common.ServerAddr
-	MachineInfo common.MachineInfo
+// Server represents a server instance in a distributed file system, managing
+// chunk metadata, leases, and system resources. It handles network communication,
+// failure detection, and garbage collection for chunks.
+type Server struct {
+	mu       sync.RWMutex // mutex for synchronizing access to server state
+	listener net.Listener // network listener for incoming connections
 
-	listener        net.Listener
-	failureDetector *failuredetector.FailureDetector
-	rootDir         *filesystem.FileSystem
-	mu              sync.RWMutex
-	downloadBuffer  *downloadbuffer.DownloadBuffer
-	archiver        *archivemanager.ArchiverManager
-	leases          utils.Deque[*common.Lease]
-	// leasesUnderMutation map[*common.Lease]bool
-	failureDetectionCh chan string
-	chunks             map[common.ChunkHandle]*chunkInfo
-	garbage            utils.Deque[common.ChunkHandle]
-	shutdownChan       chan os.Signal
-	isDead             bool
+	rootDir *filesystem.FileSystem     // root directory file system for chunk storage
+	leases  utils.Deque[*common.Lease] // deque of active leases for chunk access
+
+	archiver        *archivemanager.ArchiverManager  // manager for archiving chunks
+	downloadBuffer  *downloadbuffer.DownloadBuffer   // buffer for handling downloads
+	failureDetector *failuredetector.FailureDetector // detector for identifying node failures
+
+	failureDetectionCh chan string                       // channel for failure detection events
+	garbage            utils.Deque[common.ChunkHandle]   // deque of chunks marked for garbage collection
+	chunks             map[common.ChunkHandle]*chunkInfo // map of chunk handles to their metadata
+
+	isDead       bool           // indicates if the server is marked as dead
+	shutdownChan chan os.Signal // channel for handling shutdown signals
+
+	ServerAddr  common.ServerAddr  // address of this server
+	MasterAddr  common.ServerAddr  // address of the master server
+	MachineInfo common.MachineInfo // information about the server's machine
 }
 
-// PersistedMetaData represents metadata associated with a GFS chunk.
+// PersistedMetaData represents metadata associated with a chunk in a Google File System (GFS).
+// It stores identifying information, versioning, and status details for a chunk, used for data
+// integrity and management in a distributed file system.
 type PersistedMetaData struct {
-	Handle               common.ChunkHandle  // Unique identifier for the chunk
-	Version              common.ChunkVersion // Latest Persisted Version number of the chunk
-	Length               common.Offset       //  offset in the chunk
-	Mutations            map[common.ChunkVersion]common.Mutation
-	Completed, Abandoned bool            // this handle is completed <that it is filled>
-	ChunkSize            int64           // Size of the chunk
-	CreationTime         time.Time       // Creation time of the chunk
-	LastModified         time.Time       // Last modified time of the chunk
-	AccessTime           time.Time       // Last access time of the chunk
-	Checksum             common.Checksum // Checksum or hash of the chunk data
-	Replication          int             // Replication level of the chunk (we need to know the number of replication  that we have )
-	ServerIP             string          // IP address of the chunk server
-	ServerStatus         int             // Status of the chunk server (last know server )
-	MetadataVersion      int             // Version of metadata associated with the chunk
-	StatusFlags          []string        // Flags indicating the status of the chunk
+	Handle  common.ChunkHandle  // Unique identifier for the chunk
+	Version common.ChunkVersion // Latest persisted version number of the chunk
+	Length  common.Offset       // Offset in the chunk
+
+	ChunkSize            int64                                   // Size of the chunk in bytes
+	Mutations            map[common.ChunkVersion]common.Mutation // Map of mutations to be applied to the chunk
+	Completed, Abandoned bool                                    // Indicates if the chunk is completed (filled) or abandoned
+
+	Checksum        common.Checksum // Checksum or hash of the chunk data for integrity verification
+	Replication     int             // Number of replicas for this chunk
+	ServerStatus    int             // Last known status of the chunk server
+	MetadataVersion int             // Version of the metadata associated with the chunk
+
+	ServerIP    string   // IP address of the chunk server hosting the chunk
+	StatusFlags []string // Flags indicating the status of the chunk (e.g., active, corrupted)
+
+	CreationTime time.Time // Creation timestamp of the chunk
+	LastModified time.Time // Last modified timestamp of the chunk
+	AccessTime   time.Time // Last access timestamp of the chunk
 }
 
-func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, root string) *ChunkServer {
+// NewChunkServer initializes and starts a new ChunkServer instance.
+// It sets up the server with the specified server address, master address, and root directory.
+// The server handles file system operations, failure detection, download buffering, and periodic tasks
+// such as heartbeats, garbage collection, metadata persistence, and chunk archiving.
+// It returns a pointer to the initialized Server and an error if any initialization step fails.
+//
+// Parameters:
+//   - serverAddr: The address the ChunkServer will listen on for incoming connections.
+//   - masterAddr: The address of the master server for communication and coordination.
+//   - root: The root directory path for the server's file system operations.
+//
+// Returns:
+//   - *Server: A pointer to the initialized ChunkServer instance.
+//   - error: An error if any step in the initialization process fails, otherwise nil.
+func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, root string) (*Server, error) {
+	log.Info().Msg(fmt.Sprintf("Starting ChunkServer = %s to communicate with @%v", serverAddr, masterAddr))
 	hostname, err := os.Hostname()
 	if err != nil {
-		log.Printf("cannot retrieve chunk server hostname")
+		return nil, err
 	}
-
-	log.Info().Msg(fmt.Sprintf("Starting ChunkServer = %s to communicate with @%v", serverAddr, masterAddr))
-
-	// // retrieve the coordinate location of server to calculate the primary and secondaries
-	var machineInfo common.MachineInfo
-	machineInfo.Hostname = hostname
-	machineInfo.RoundTripProximityTime = calculateRoundTripProximity(15, string(masterAddr))
+	fs := filesystem.NewFileSystem(root)
+	machineInfo := common.MachineInfo{
+		Hostname:               hostname,
+		RoundTripProximityTime: calculateRoundTripProximity(15, string(masterAddr)),
+	}
 
 	failureDetector, err := failuredetector.NewFailureDetector(
 		string(masterAddr), 2,
@@ -110,19 +143,18 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 			UpperBoundThreshold: 30,
 		})
 	if err != nil {
-		log.Fatal().Msg("failure detector could not be started\n")
+		return nil, err
 	}
 
-	fs := filesystem.NewFileSystem(root)
 	dbuffer, err := downloadbuffer.NewDownloadBuffer(
 		common.DownloadBufferTick,
 		common.DownloadBufferItemExpire,
 	)
 	if err != nil {
-		log.Fatal().Msg("download buffer could not be started\n")
+		return nil, err
 	}
 
-	cs := &ChunkServer{
+	cs := &Server{
 		ServerAddr:         serverAddr,
 		MasterAddr:         masterAddr,
 		MachineInfo:        machineInfo,
@@ -141,26 +173,20 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 	rpc := rpc.NewServer()
 	err = rpc.Register(cs)
 	if err != nil {
-		log.Err(err).Stack().Msg(err.Error())
-		return nil
+		return nil, err
 	}
 	l, err := net.Listen("tcp", string(cs.ServerAddr))
 	if err != nil {
-		log.Err(err).Stack().Msg(fmt.Sprintf("cannot trigger chunk server %s to listen\n", cs.ServerAddr))
-		os.Exit(1)
+		return nil, err
 	}
 	cs.listener = l
-	err = cs.rootDir.MkDir(".") // create a root directory
-	if err != nil {
-		log.Err(err).Stack()
-		log.Fatal().Msg(fmt.Sprintf("cannot create root directory (%s)\n", root))
-		return nil
+
+	if err := cs.rootDir.MkDir("."); err != nil {
+		return nil, err
 	}
-	err = cs.loadMetadata()
-	if err != nil {
-		log.Err(err).Stack()
-		log.Fatal().Msg(fmt.Sprintf("cannot load metadata due to error (%s)\n", err))
-		return nil
+
+	if err := cs.loadMetadata(); err != nil {
+		return nil, err
 	}
 
 	signal.Notify(cs.shutdownChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
@@ -168,33 +194,32 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 		for {
 			select {
 			case <-cs.shutdownChan:
-				cs.failureDetector.ShutdownCh <- true
+				cs.failureDetector.Shutdown()
 				return
 			default:
 			}
-			conn, err := listener.Accept()
-			if err != nil {
+
+			if conn, err := listener.Accept(); err != nil {
 				if cs.isDead {
-					log.Fatal().Msg("server died \n")
-				}
-				continue
-			}
-			go func() {
-				rpc.ServeConn(conn) // handle individual connection
-				err := conn.Close()
-				if err != nil {
 					return
 				}
-			}()
+			} else {
+				go func() {
+					rpc.ServeConn(conn)
+					err := conn.Close()
+					if err != nil {
+						return
+					}
+				}()
+			}
 		}
 	}(cs.listener)
 
-	// run background worker for garbage collection,
-	// heart beat synchronization with master
 	go func() {
 		heartBeatTicker := time.NewTicker(common.HeartBeatInterval)
 		garbageCollectionTicker := time.NewTicker(common.GarbageCollectionInterval)
 		persistMetaDataTicker := time.NewTicker(common.PersistMetaDataInterval)
+		archiveChunkTicker := time.NewTicker(common.ArchiveChunkInterval)
 		quickStart := make(chan struct{}, 1)
 		quickStart <- struct{}{}
 
@@ -206,74 +231,51 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 		// 2. the master polls for the status of the chunk server []
 		//
 		var branchInfo common.BranchInfo
-		log.Info().Msg("running background task...")
 		for {
 			select {
 			case <-quickStart:
 				branchInfo.Event = string(common.HeartBeat)
 				branchInfo.Err = cs.heartBeat()
 			case <-cs.shutdownChan:
-				log.Info().Msg("shutting down background workers") // close background workers
 				log.Info().Msg(fmt.Sprintf("Gracefully shutting down server (%s)...\n", serverAddr))
 				time.Sleep(time.Second * 1)
 				cs.downloadBuffer.Done()
+				cs.archiver.Close()
 				return
-			case <-heartBeatTicker.C: // TODO: handle heartbeat communitcation
+			case <-heartBeatTicker.C:
 				branchInfo.Event = string(common.HeartBeat)
 				branchInfo.Err = cs.heartBeat()
-			case <-persistMetaDataTicker.C: // TODO handle data persistence to file using decoding
+			case <-persistMetaDataTicker.C:
 				branchInfo.Event = string(common.PersistMetaData)
 				branchInfo.Err = cs.persistMetadata()
 			case <-garbageCollectionTicker.C:
 				branchInfo.Event = string(common.GarbageCollection)
 				branchInfo.Err = cs.garbageCollection()
-			default:
-			}
-
-			if branchInfo.Err != nil {
-				log.Info().Msg(fmt.Sprintf("Server %s  background-(%s) event triggered an error (%s)\n", cs.ServerAddr, branchInfo.Event, branchInfo.Err))
-				log.Err(branchInfo.Err).Stack().Send()
-			}
-			//else {
-			// log.Info().Msg(fmt.Sprintf("Server %s background-(%s) event trigged\n", cs.ServerAddr, branchInfo.Event))
-			//}
-		}
-	}()
-
-	// store cold chunks in cold storage
-	go func() {
-		archiveChunkTicker := time.NewTicker(common.ArchiveChunkInterval)
-		var branchInfo common.BranchInfo
-		log.Info().Msg("Archival background worker .....")
-		for {
-			select {
-			case <-cs.shutdownChan:
-				log.Info().Msg("shutting down archiving workers") // close background workers
-				cs.archiver.Close()
 				return
 			case <-archiveChunkTicker.C:
 				branchInfo.Event = string(common.Archival)
 				branchInfo.Err = cs.archiveChunks()
 			default:
 			}
+
 			if branchInfo.Err != nil {
-				log.Info().Msg(
+				log.Err(branchInfo.Err).Msgf(
 					fmt.Sprintf("Server %s  background-(%s) event triggered an error (%s)\n",
 						cs.ServerAddr, branchInfo.Event, branchInfo.Err))
-				continue
+				return
 			}
+
+			log.Info().Msg(fmt.Sprintf(
+				"Server %s background-(%s) event trigged\n",
+				cs.ServerAddr, branchInfo.Event))
 		}
 	}()
 
 	log.Printf("ChunkServer is now running. addr = %v, root path = %v, master addr = %v", serverAddr, root, masterAddr)
-	return cs
+	return cs, nil
 }
 
-//func (cs *ChunkServer) IsAlive() bool {
-//	return !cs.isDead
-//}
-
-func (cs *ChunkServer) archiveChunks() error {
+func (cs *Server) archiveChunks() error {
 	chunksToArchive := map[common.ChunkHandle]*chunkInfo{}
 	cs.mu.Lock()
 	utils.ExtractFromMap(
@@ -325,7 +327,7 @@ func (cs *ChunkServer) archiveChunks() error {
 	return nil
 }
 
-func (cs *ChunkServer) decompressCompressedChunk(handle common.ChunkHandle) error {
+func (cs *Server) decompressCompressedChunk(handle common.ChunkHandle) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -350,7 +352,7 @@ func (cs *ChunkServer) decompressCompressedChunk(handle common.ChunkHandle) erro
 }
 
 // Loads meta data information into server memory
-func (cs *ChunkServer) loadMetadata() error {
+func (cs *Server) loadMetadata() error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -405,7 +407,7 @@ func (cs *ChunkServer) loadMetadata() error {
 	return nil
 }
 
-func (cs *ChunkServer) heartBeat() error {
+func (cs *Server) heartBeat() error {
 	arg := rpc_struct.HeartBeatArg{
 		Address:     cs.ServerAddr,
 		MachineInfo: cs.MachineInfo,
@@ -450,7 +452,7 @@ func (cs *ChunkServer) heartBeat() error {
 	return nil
 }
 
-func (cs *ChunkServer) persistMetadata() error {
+func (cs *Server) persistMetadata() error {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 
@@ -492,7 +494,7 @@ func (cs *ChunkServer) persistMetadata() error {
 	return encoder.Encode(metadatas)
 }
 
-func (cs *ChunkServer) garbageCollection() error {
+func (cs *Server) garbageCollection() error {
 	// https://chat.openai.com/c/670528fb-ee6a-4684-8b14-0c9e68366be0
 	log.Info().Msg("::: Doing some garabage collection >>> ")
 	for cs.garbage.Length() > 0 {
@@ -505,7 +507,7 @@ func (cs *ChunkServer) garbageCollection() error {
 	return nil
 }
 
-func (cs *ChunkServer) deleteChunk(handle common.ChunkHandle) error {
+func (cs *Server) deleteChunk(handle common.ChunkHandle) error {
 	cs.mu.Lock()
 	delete(cs.chunks, handle)
 	cs.mu.Unlock()
@@ -516,7 +518,7 @@ func (cs *ChunkServer) deleteChunk(handle common.ChunkHandle) error {
 	return cs.rootDir.RemoveFile(fmt.Sprintf(common.ChunkFileNameFormat, handle) + archivemanager.ZIP_EXT)
 }
 
-func (cs *ChunkServer) Shutdown() {
+func (cs *Server) Shutdown() {
 	if cs.isDead {
 		log.Info().Msgf("Server %v is dead\n", cs.ServerAddr)
 		return
@@ -541,7 +543,7 @@ func (cs *ChunkServer) Shutdown() {
 //	RPC METHODS
 //
 // /////////////////////////////////
-func (cs *ChunkServer) RPCSysReportHandler(args rpc_struct.SysReportInfoArg, reply *rpc_struct.SysReportInfoReply) error {
+func (cs *Server) RPCSysReportHandler(args rpc_struct.SysReportInfoArg, reply *rpc_struct.SysReportInfoReply) error {
 
 	log.Info().Msg(fmt.Sprintf("<<< Gathering sys start  for %v >>> ", cs.ServerAddr))
 	var m runtime.MemStats
@@ -598,7 +600,7 @@ func (cs *ChunkServer) RPCSysReportHandler(args rpc_struct.SysReportInfoArg, rep
 // version number greater than the one in its records, the master
 // assumes that it failed when granting the lease and so
 // takes the higher version to be up-to-date.
-func (cs *ChunkServer) RPCCheckChunkVersionHandler(args rpc_struct.CheckChunkVersionArg, reply *rpc_struct.CheckChunkVersionReply) error {
+func (cs *Server) RPCCheckChunkVersionHandler(args rpc_struct.CheckChunkVersionArg, reply *rpc_struct.CheckChunkVersionReply) error {
 	cs.mu.RLock()
 	chinfo, ok := cs.chunks[args.Handle]
 	cs.mu.RUnlock()
@@ -630,7 +632,7 @@ func (cs *ChunkServer) RPCCheckChunkVersionHandler(args rpc_struct.CheckChunkVer
 	return nil
 }
 
-func (cs *ChunkServer) RPCReadChunkHandler(args rpc_struct.ReadChunkArgs, reply *rpc_struct.ReadChunkReply) error {
+func (cs *Server) RPCReadChunkHandler(args rpc_struct.ReadChunkArgs, reply *rpc_struct.ReadChunkReply) error {
 	cs.mu.RLock()
 	chInfo, ok := cs.chunks[args.Handle]
 	cs.mu.RUnlock()
@@ -660,7 +662,7 @@ func (cs *ChunkServer) RPCReadChunkHandler(args rpc_struct.ReadChunkArgs, reply 
 	return err
 }
 
-func (cs *ChunkServer) RPCCreateChunkHandler(args rpc_struct.CreateChunkArgs, reply *rpc_struct.CreateChunkReply) error {
+func (cs *Server) RPCCreateChunkHandler(args rpc_struct.CreateChunkArgs, reply *rpc_struct.CreateChunkReply) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	log.Info().Msg(fmt.Sprintf("Server (%v) - create chunk %v", cs.ServerAddr, args.Handle))
@@ -687,7 +689,7 @@ func (cs *ChunkServer) RPCCreateChunkHandler(args rpc_struct.CreateChunkArgs, re
 	return cs.rootDir.CreateFile(filename)
 }
 
-func (cs *ChunkServer) RPCForwardDataHandler(args rpc_struct.ForwardDataArgs, reply *rpc_struct.ForwardDataReply) error {
+func (cs *Server) RPCForwardDataHandler(args rpc_struct.ForwardDataArgs, reply *rpc_struct.ForwardDataReply) error {
 	// check if we have the item previously
 	_, ok := cs.downloadBuffer.Get(args.DownloadBufferId)
 	if ok {
@@ -709,7 +711,7 @@ func (cs *ChunkServer) RPCForwardDataHandler(args rpc_struct.ForwardDataArgs, re
 	return nil
 }
 
-func (cs *ChunkServer) RPCGrantLeaseHandler(args rpc_struct.GrantLeaseInfoArgs, reply *rpc_struct.GrantLeaseInfoReply) error {
+func (cs *Server) RPCGrantLeaseHandler(args rpc_struct.GrantLeaseInfoArgs, reply *rpc_struct.GrantLeaseInfoReply) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	cs.leases.PushBack(&common.Lease{
@@ -721,7 +723,7 @@ func (cs *ChunkServer) RPCGrantLeaseHandler(args rpc_struct.GrantLeaseInfoArgs, 
 	return nil
 }
 
-func (cs *ChunkServer) RPCWriteChunkHandler(args rpc_struct.WriteChunkArgs, reply *rpc_struct.WriteChunkReply) error {
+func (cs *Server) RPCWriteChunkHandler(args rpc_struct.WriteChunkArgs, reply *rpc_struct.WriteChunkReply) error {
 	data, ok := cs.downloadBuffer.Get(args.DownloadBufferId)
 	if !ok {
 		reply.ErrorCode = common.DownloadBufferMiss
@@ -752,7 +754,7 @@ func (cs *ChunkServer) RPCWriteChunkHandler(args rpc_struct.WriteChunkArgs, repl
 	return nil
 }
 
-func doWriteOperation(args rpc_struct.WriteChunkArgs, cs *ChunkServer, data []byte) error {
+func doWriteOperation(args rpc_struct.WriteChunkArgs, cs *Server, data []byte) error {
 	log.Info().Msgf("[writing to chunk] %v", cs.ServerAddr)
 	errCh := make(chan error)
 	var wg sync.WaitGroup
@@ -840,7 +842,7 @@ func doWriteOperation(args rpc_struct.WriteChunkArgs, cs *ChunkServer, data []by
 	return nil
 }
 
-func (cs *ChunkServer) RPCApplyMutationHandler(args rpc_struct.ApplyMutationArgs, reply *rpc_struct.ApplyMutationReply) error {
+func (cs *Server) RPCApplyMutationHandler(args rpc_struct.ApplyMutationArgs, reply *rpc_struct.ApplyMutationReply) error {
 
 	data, ok := cs.downloadBuffer.Get(args.DownloadBufferId)
 	if !ok {
@@ -885,7 +887,7 @@ func (cs *ChunkServer) RPCApplyMutationHandler(args rpc_struct.ApplyMutationArgs
 	return nil
 }
 
-func (cs *ChunkServer) RPCAppendChunkHandler(args rpc_struct.AppendChunkArgs, reply *rpc_struct.AppendChunkReply) error {
+func (cs *Server) RPCAppendChunkHandler(args rpc_struct.AppendChunkArgs, reply *rpc_struct.AppendChunkReply) error {
 	data, ok := cs.downloadBuffer.Get(args.DownloadBufferId)
 	if !ok {
 		reply.ErrorCode = common.DownloadBufferMiss
@@ -968,7 +970,7 @@ func (cs *ChunkServer) RPCAppendChunkHandler(args rpc_struct.AppendChunkArgs, re
 	return nil
 }
 
-func (cs *ChunkServer) RPCGetSnapshotHandler(args rpc_struct.GetSnapshotArgs, reply *rpc_struct.GetSnapshotReply) error {
+func (cs *Server) RPCGetSnapshotHandler(args rpc_struct.GetSnapshotArgs, reply *rpc_struct.GetSnapshotReply) error {
 	handle := args.Handle
 	cs.mu.RLock()
 	chInfo, ok := cs.chunks[handle]
@@ -1001,7 +1003,7 @@ func (cs *ChunkServer) RPCGetSnapshotHandler(args rpc_struct.GetSnapshotArgs, re
 	return shared.UnicastToRPCServer(string(args.Replicas), "ChunkServer.RPCApplyCopyHandler", applyCopyArgs, &r)
 }
 
-func (cs *ChunkServer) RPCApplyCopyHandler(args rpc_struct.ApplyCopyArgs, reply *rpc_struct.AppendChunkReply) error {
+func (cs *Server) RPCApplyCopyHandler(args rpc_struct.ApplyCopyArgs, reply *rpc_struct.AppendChunkReply) error {
 	handle := args.Handle
 	err := cs.decompressCompressedChunk(handle)
 	if err != nil {
@@ -1030,7 +1032,7 @@ func (cs *ChunkServer) RPCApplyCopyHandler(args rpc_struct.ApplyCopyArgs, reply 
 //        HELPER FUNCTIONS
 ////////////////////////////////////////////
 
-func (cs *ChunkServer) mutate(handle common.ChunkHandle, mutation *common.Mutation) error {
+func (cs *Server) mutate(handle common.ChunkHandle, mutation *common.Mutation) error {
 	var shouldLock bool
 
 	if mutation.MutationType == common.MutationAppend || mutation.MutationType == common.MutationWrite {
@@ -1050,7 +1052,7 @@ func (cs *ChunkServer) mutate(handle common.ChunkHandle, mutation *common.Mutati
 	return err
 }
 
-func (cs *ChunkServer) writeChunk(handle common.ChunkHandle, data []byte, mutationType common.MutationType, offset common.Offset, lock bool) error {
+func (cs *Server) writeChunk(handle common.ChunkHandle, data []byte, mutationType common.MutationType, offset common.Offset, lock bool) error {
 
 	cs.mu.RLock()
 	chInfo := cs.chunks[handle]
@@ -1107,7 +1109,7 @@ func (cs *ChunkServer) writeChunk(handle common.ChunkHandle, data []byte, mutati
 	return nil
 }
 
-func (cs *ChunkServer) readChunk(handle common.ChunkHandle, offset common.Offset, data []byte) (int, error) {
+func (cs *Server) readChunk(handle common.ChunkHandle, offset common.Offset, data []byte) (int, error) {
 	filename := fmt.Sprintf(common.ChunkFileNameFormat, handle)
 
 	f, err := cs.rootDir.GetFile(filename, os.O_RDONLY, common.FileMode)
@@ -1137,7 +1139,6 @@ func bToMb(b uint64) uint64 {
 
 func calculateRoundTripProximity(duration int, masterAddr string) float64 {
 	var buffer bytes.Buffer
-	// forked process - not a great solution so far
 	cmd := exec.Command("ping", "-c", fmt.Sprintf("%d", duration), masterAddr)
 	cmd.Stdout = &buffer
 	if cmd.Run() != nil {
