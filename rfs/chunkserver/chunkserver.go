@@ -26,6 +26,7 @@ import (
 	archivemanager "github.com/caleberi/distributed-system/rfs/archive_manager"
 	"github.com/caleberi/distributed-system/rfs/common"
 	downloadbuffer "github.com/caleberi/distributed-system/rfs/download_buffer"
+	failuredetector "github.com/caleberi/distributed-system/rfs/failure_detector"
 	filesystem "github.com/caleberi/distributed-system/rfs/file_system"
 	"github.com/caleberi/distributed-system/rfs/rpc_struct"
 	"github.com/caleberi/distributed-system/rfs/shared"
@@ -54,7 +55,7 @@ type ChunkServer struct {
 	MachineInfo common.MachineInfo
 
 	listener        net.Listener
-	failureDetector *shared.FailureDetector
+	failureDetector *failuredetector.FailureDetector
 	rootDir         *filesystem.FileSystem
 	mu              sync.RWMutex
 	downloadBuffer  *downloadbuffer.DownloadBuffer
@@ -100,11 +101,11 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 	machineInfo.Hostname = hostname
 	machineInfo.RoundTripProximityTime = calculateRoundTripProximity(15, string(masterAddr))
 
-	failureDetector, err := shared.NewFailureDetector(
+	failureDetector, err := failuredetector.NewFailureDetector(
 		string(masterAddr), 2,
 		&redis.Options{Addr: "localhost:6379"},
 		5*time.Minute,
-		shared.SuspicionLevel{
+		failuredetector.SuspicionLevel{
 			AccruementThreshold: 70,
 			UpperBoundThreshold: 30,
 		})
@@ -413,9 +414,9 @@ func (cs *ChunkServer) heartBeat() error {
 		arg.ExtendLease = true
 	}
 	var reply rpc_struct.HeartBeatReply
-	reply.NetworkData = shared.NetworkData{
+	reply.NetworkData = failuredetector.NetworkData{
 		RoundTrip: 0,
-		ForwardTrip: shared.TripInfo{
+		ForwardTrip: failuredetector.TripInfo{
 			SentAt: time.Now(),
 		},
 	}
