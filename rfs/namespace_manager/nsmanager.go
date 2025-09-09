@@ -1,4 +1,4 @@
-package master_server
+package namespacemanager
 
 import (
 	"fmt"
@@ -11,23 +11,24 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-type serializedNsTreeNode struct {
+type SerializedNsTreeNode struct {
 	IsDir    bool
 	Path     common.Path
 	Children map[string]int
 	Chunks   int64
 }
 
-type nsTree struct {
+type NsTree struct {
 	sync.RWMutex // for locking mechanism on file namespace
 	Path         common.Path
-	// directory related
-	isDir         bool               // register as a directory if the path is not the basefile
-	childrenNodes map[string]*nsTree // child subfolder /folder
 
 	// file related
-	length int64 // the length of a current file
-	chunks int64 // monitor chunk per level in tree representation
+	Length int64 // the length of a current file
+	Chunks int64 // monitor chunk per level in tree representation
+
+	// directory related
+	IsDir         bool               // register as a directory if the path is not the basefile
+	childrenNodes map[string]*NsTree // child subfolder /folder
 }
 
 // Since the namespace can have many nodes, read-write lock
@@ -40,8 +41,8 @@ type nsTree struct {
 // being deleted, renamed, or snapshotted. The write locks on
 // file names serialize attempts to create a file with the same (ensure linear-lity)
 // name twice.
-type namespaceManager struct {
-	root *nsTree
+type NamespaceManager struct {
+	root *NsTree
 	// in order to figure out when to serialize for persistence
 	serializationCount int
 	// find out if the right number of trees node were deserialized
@@ -51,19 +52,19 @@ type namespaceManager struct {
 	shutdown             chan bool
 }
 
-func NewNameSpaceManager(cleanup time.Duration) *namespaceManager {
-	nm := &namespaceManager{
-		root: &nsTree{
-			isDir:         true,
+func NewNameSpaceManager(cleanup time.Duration) *NamespaceManager {
+	nm := &NamespaceManager{
+		root: &NsTree{
+			IsDir:         true,
 			Path:          "*",
-			childrenNodes: make(map[string]*nsTree),
+			childrenNodes: make(map[string]*NsTree),
 		},
 		cleanUpInterval: cleanup,
 		deleteCache:     make(map[string]struct{}),
 		shutdown:        make(chan bool),
 	}
 
-	go func(nm *namespaceManager) {
+	go func(nm *NamespaceManager) {
 		cleanup := time.NewTicker(nm.cleanUpInterval)
 		for {
 			select {
@@ -71,7 +72,7 @@ func NewNameSpaceManager(cleanup time.Duration) *namespaceManager {
 				cleanup.Stop()
 				return
 			case <-cleanup.C:
-				queue := utils.Deque[*nsTree]{}
+				queue := utils.Deque[*NsTree]{}
 				queue.PushBack(nm.root)
 				for queue.Length() != 0 {
 					curr := queue.PopFront() // BFS
@@ -100,19 +101,19 @@ func NewNameSpaceManager(cleanup time.Duration) *namespaceManager {
 	return nm
 }
 
-func (nm *namespaceManager) Shutdown() {
+func (nm *NamespaceManager) Shutdown() {
 	nm.shutdown <- true
 }
 
-func (nm *namespaceManager) SliceToNsTree(r []serializedNsTreeNode, id int) *nsTree {
+func (nm *NamespaceManager) SliceToNsTree(r []SerializedNsTreeNode, id int) *NsTree {
 
-	n := &nsTree{
+	n := &NsTree{
 		Path:   r[id].Path,
-		isDir:  r[id].IsDir,
-		chunks: r[id].Chunks,
+		Chunks: r[id].Chunks,
+		IsDir:  r[id].IsDir,
 	}
 	if r[id].IsDir {
-		n.childrenNodes = make(map[string]*nsTree)
+		n.childrenNodes = make(map[string]*NsTree)
 		for k, child := range r[id].Children {
 			n.childrenNodes[k] = nm.SliceToNsTree(r, child)
 		}
@@ -126,7 +127,7 @@ func (nm *namespaceManager) SliceToNsTree(r []serializedNsTreeNode, id int) *nsT
 			if parent.childrenNodes != nil {
 				parent.childrenNodes[string(r[id].Path)] = n
 			} else {
-				parent.childrenNodes = make(map[string]*nsTree)
+				parent.childrenNodes = make(map[string]*NsTree)
 				parent.childrenNodes[string(r[id].Path)] = n
 			}
 
@@ -136,7 +137,7 @@ func (nm *namespaceManager) SliceToNsTree(r []serializedNsTreeNode, id int) *nsT
 	return n
 }
 
-func (nm *namespaceManager) Deserialize(nodes []serializedNsTreeNode) *nsTree {
+func (nm *NamespaceManager) Deserialize(nodes []SerializedNsTreeNode) *NsTree {
 	nm.root.RLock()
 	defer nm.root.RUnlock()
 	nm.root = nm.SliceToNsTree(nodes, len(nodes)-1)
@@ -145,20 +146,20 @@ func (nm *namespaceManager) Deserialize(nodes []serializedNsTreeNode) *nsTree {
 
 // Serialize helps to create a storable tree data structure on disk with gob
 // package
-func (nm *namespaceManager) Serialize() []serializedNsTreeNode {
+func (nm *NamespaceManager) Serialize() []SerializedNsTreeNode {
 	nm.root.RLock()
 	defer nm.root.RUnlock()
 
 	nm.serializationCount = 0
-	ret := []serializedNsTreeNode{}
+	ret := []SerializedNsTreeNode{}
 	nm.nsTreeToSlice(&ret, nm.root)
 	return ret
 }
 
-func (nm *namespaceManager) nsTreeToSlice(r *[]serializedNsTreeNode, node *nsTree) int {
-	n := serializedNsTreeNode{
-		IsDir:  node.isDir,
-		Chunks: node.chunks,
+func (nm *NamespaceManager) nsTreeToSlice(r *[]SerializedNsTreeNode, node *NsTree) int {
+	n := SerializedNsTreeNode{
+		IsDir:  node.IsDir,
+		Chunks: node.Chunks,
 		Path:   node.Path,
 	}
 	if n.IsDir {
@@ -174,12 +175,12 @@ func (nm *namespaceManager) nsTreeToSlice(r *[]serializedNsTreeNode, node *nsTre
 	return ret
 }
 
-func (nm *namespaceManager) lockParents(p common.Path, lock bool) ([]string, *nsTree, error) {
+func (nm *NamespaceManager) lockParents(p common.Path, lock bool) ([]string, *NsTree, error) {
 	pf := strings.Split(string(p), "/")
 	return lockParentHelper(nm.root, pf, lock)
 }
 
-func lockParentHelper(cwd *nsTree, pf []string, lock bool) ([]string, *nsTree, error) {
+func lockParentHelper(cwd *NsTree, pf []string, lock bool) ([]string, *NsTree, error) {
 	var parents []string
 	for i := 1; i < len(pf); i++ {
 		if cwd == nil {
@@ -201,7 +202,7 @@ func lockParentHelper(cwd *nsTree, pf []string, lock bool) ([]string, *nsTree, e
 	return parents, cwd, nil
 }
 
-func (nm *namespaceManager) unlockParents(parents []string, lock bool) {
+func (nm *NamespaceManager) unlockParents(parents []string, lock bool) {
 	cwd := nm.root
 	for i, parent := range parents {
 		cwd = cwd.childrenNodes[parent]
@@ -215,13 +216,13 @@ func (nm *namespaceManager) unlockParents(parents []string, lock bool) {
 	}
 }
 
-func (nm *namespaceManager) Create(p common.Path) error {
+func (nm *NamespaceManager) Create(p common.Path) error {
 	var (
 		filename string
 		dirpath  string
 	)
-	dirpath, filename = nm.retrievePartitionFromPath(p)
-	_, err := validateFilenameStr(filename, p)
+	dirpath, filename = nm.RetrievePartitionFromPath(p)
+	_, err := utils.ValidateFilenameStr(filename, p)
 	if err != nil {
 		return err
 	}
@@ -236,17 +237,17 @@ func (nm *namespaceManager) Create(p common.Path) error {
 		return fmt.Errorf("path %s exist before", p)
 	}
 
-	cwd.childrenNodes[filename] = &nsTree{Path: p}
+	cwd.childrenNodes[filename] = &NsTree{Path: p}
 	return nil
 }
 
-func (nm *namespaceManager) Delete(p common.Path) error {
+func (nm *NamespaceManager) Delete(p common.Path) error {
 	var (
 		filename string
 		dirpath  string
 	)
-	dirpath, filename = nm.retrievePartitionFromPath(p)
-	_, err := validateFilenameStr(filename, p)
+	dirpath, filename = nm.RetrievePartitionFromPath(p)
+	_, err := utils.ValidateFilenameStr(filename, p)
 	if err != nil {
 		return err
 	}
@@ -274,13 +275,13 @@ func (nm *namespaceManager) Delete(p common.Path) error {
 	return nil
 }
 
-func (nm *namespaceManager) MkDir(p common.Path) error {
+func (nm *NamespaceManager) MkDir(p common.Path) error {
 	// each nodetree is a directory
 	var (
 		dirpath string
 		dirname string
 	)
-	dirpath, dirname = nm.retrievePartitionFromPath(p)
+	dirpath, dirname = nm.RetrievePartitionFromPath(p)
 	parents, cwd, err := nm.lockParents(common.Path(dirpath), true)
 	defer nm.unlockParents(parents, true)
 	if err != nil {
@@ -290,15 +291,15 @@ func (nm *namespaceManager) MkDir(p common.Path) error {
 	if _, ok := cwd.childrenNodes[dirname]; ok {
 		return nil
 	}
-	cwd.childrenNodes[dirname] = &nsTree{
-		isDir:         true,
-		childrenNodes: make(map[string]*nsTree),
+	cwd.childrenNodes[dirname] = &NsTree{
+		IsDir:         true,
+		childrenNodes: make(map[string]*NsTree),
 		Path:          p,
 	}
 	return nil
 }
 
-func (nm *namespaceManager) MkDirAll(p common.Path) error {
+func (nm *NamespaceManager) MkDirAll(p common.Path) error {
 	// I don't give a fuck whether it is not optimized lol
 	fragments := []string{}
 	sfrags := strings.Split(string(p), "/")
@@ -322,8 +323,8 @@ func (nm *namespaceManager) MkDirAll(p common.Path) error {
 	return nil
 }
 
-func (nm *namespaceManager) Get(p common.Path) (*nsTree, error) {
-	dirpath, filenameOrDirname := nm.retrievePartitionFromPath(p)
+func (nm *NamespaceManager) Get(p common.Path) (*NsTree, error) {
+	dirpath, filenameOrDirname := nm.RetrievePartitionFromPath(p)
 	log.Info().Msg(fmt.Sprintf("dirpath [%v] & filenameOrDirname [%v]", dirpath, filenameOrDirname))
 	parents, cwd, err := nm.lockParents(common.Path(dirpath), false)
 	defer nm.unlockParents(parents, false)
@@ -337,14 +338,14 @@ func (nm *namespaceManager) Get(p common.Path) (*nsTree, error) {
 	return nil, fmt.Errorf("node with path %s does not exist for %s", dirpath, filenameOrDirname)
 }
 
-func (nm *namespaceManager) Rename(source, target common.Path) error {
+func (nm *NamespaceManager) Rename(source, target common.Path) error {
 	var (
 		srcDirnameOrFilename    string
 		srcDirpath              string
 		targetDirnameOrFilename string
 		targetDirpath           string
 	)
-	srcDirpath, srcDirnameOrFilename = nm.retrievePartitionFromPath(source)
+	srcDirpath, srcDirnameOrFilename = nm.RetrievePartitionFromPath(source)
 	parents, cwd, err := nm.lockParents(common.Path(srcDirpath), true)
 	defer nm.unlockParents(parents, true)
 
@@ -356,7 +357,7 @@ func (nm *namespaceManager) Rename(source, target common.Path) error {
 		return fmt.Errorf("filename/dirname %s does not seem exist", srcDirnameOrFilename)
 	}
 
-	targetDirpath, targetDirnameOrFilename = nm.retrievePartitionFromPath(target)
+	targetDirpath, targetDirnameOrFilename = nm.RetrievePartitionFromPath(target)
 	_ = targetDirpath
 
 	node := cwd.childrenNodes[srcDirnameOrFilename]
@@ -366,8 +367,8 @@ func (nm *namespaceManager) Rename(source, target common.Path) error {
 	return nil
 }
 
-func (nm *namespaceManager) List(p common.Path) ([]common.PathInfo, error) {
-	var dir *nsTree
+func (nm *NamespaceManager) List(p common.Path) ([]common.PathInfo, error) {
+	var dir *NsTree
 	if p == common.Path("/") {
 		dir = nm.root
 	} else {
@@ -380,19 +381,19 @@ func (nm *namespaceManager) List(p common.Path) ([]common.PathInfo, error) {
 	}
 
 	info := []common.PathInfo{}
-	queue := utils.Deque[*nsTree]{}
+	queue := utils.Deque[*NsTree]{}
 	queue.PushBack(dir)
 	for queue.Length() > 0 {
 		current := queue.PopFront()
 		for name, child := range current.childrenNodes {
-			if child.isDir && len(child.childrenNodes) != 0 {
+			if child.IsDir && len(child.childrenNodes) != 0 {
 				queue.PushBack(child)
 			}
 			info = append(info, common.PathInfo{
 				Path:   string(child.Path),
-				IsDir:  child.isDir,
-				Length: child.length,
-				Chunk:  child.chunks,
+				IsDir:  child.IsDir,
+				Length: child.Length,
+				Chunk:  child.Chunks,
 				Name:   name,
 			})
 		}
@@ -401,7 +402,7 @@ func (nm *namespaceManager) List(p common.Path) ([]common.PathInfo, error) {
 	return info, nil
 }
 
-func (nm *namespaceManager) retrievePartitionFromPath(p common.Path) (string, string) {
+func (nm *NamespaceManager) RetrievePartitionFromPath(p common.Path) (string, string) {
 	ps := string(p)
 	pf := strings.Split(ps, "/")
 	pf1, pf2 := pf[:len(pf)-1], pf[len(pf)-1]

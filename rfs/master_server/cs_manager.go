@@ -145,7 +145,7 @@ func (csm *CSManager) removeChunks(handles []common.ChunkHandle, server common.S
 	errStr := strings.Join(errs, ";")
 
 	if len(errs) != 0 {
-		return fmt.Errorf(errStr)
+		return errors.New(errStr)
 	}
 	return nil
 }

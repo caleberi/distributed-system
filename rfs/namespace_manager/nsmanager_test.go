@@ -1,4 +1,4 @@
-package master_server
+package namespacemanager
 
 import (
 	"testing"
@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func treesAreEqual(tree1, tree2 *nsTree) bool {
+func treesAreEqual(tree1, tree2 *NsTree) bool {
 	if tree1 == nil && tree2 == nil {
 		return true
 	}
@@ -16,11 +16,11 @@ func treesAreEqual(tree1, tree2 *nsTree) bool {
 		return false
 	}
 
-	if tree1.Path != tree2.Path || tree1.isDir != tree2.isDir || tree1.chunks != tree2.chunks {
+	if tree1.Path != tree2.Path || tree1.IsDir != tree2.IsDir || tree1.Chunks != tree2.Chunks {
 		return false
 	}
 
-	if tree1.isDir {
+	if tree1.IsDir {
 		if len(tree1.childrenNodes) != len(tree2.childrenNodes) {
 			return false
 		}

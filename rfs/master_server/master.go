@@ -16,6 +16,7 @@ import (
 
 	"github.com/caleberi/distributed-system/rfs/common"
 	filesystem "github.com/caleberi/distributed-system/rfs/file_system"
+	namespacemanager "github.com/caleberi/distributed-system/rfs/namespace_manager"
 	"github.com/caleberi/distributed-system/rfs/rpc_struct"
 	"github.com/caleberi/distributed-system/rfs/shared"
 	"github.com/caleberi/distributed-system/rfs/utils"
@@ -55,7 +56,7 @@ type serialChunkInfo struct {
 }
 
 type PesistentMeta struct {
-	Namespace []serializedNsTreeNode
+	Namespace []namespacemanager.SerializedNsTreeNode
 	ChunkInfo []serialChunkInfo
 }
 
@@ -64,7 +65,7 @@ type MasterServer struct {
 	ServerAddr         common.ServerAddr
 	rootDir            *filesystem.FileSystem
 	listener           net.Listener
-	namespaceManager   *namespaceManager
+	namespaceManager   *namespacemanager.NamespaceManager
 	chunkServerManager *CSManager
 	isDead             bool
 	shutdownChan       chan os.Signal
@@ -74,7 +75,7 @@ func NewMasterServer(serverAddress common.ServerAddr, root string) *MasterServer
 	ma := &MasterServer{
 		ServerAddr:         serverAddress,
 		rootDir:            filesystem.NewFileSystem(root),
-		namespaceManager:   NewNameSpaceManager(10 * time.Hour),
+		namespaceManager:   namespacemanager.NewNameSpaceManager(10 * time.Hour),
 		chunkServerManager: NewCSManager(),
 		shutdownChan:       make(chan os.Signal, 1),
 	}
@@ -453,8 +454,8 @@ func (ma *MasterServer) RPCGetPrimaryAndSecondaryServersInfoHandler(
 func (ma *MasterServer) RPCGetChunkHandleHandler(
 	args rpc_struct.GetChunkHandleArgs,
 	reply *rpc_struct.GetChunkHandleReply) error {
-	dirpath, filename := ma.namespaceManager.retrievePartitionFromPath(args.Path)
-	_, err := validateFilenameStr(filename, args.Path)
+	dirpath, filename := ma.namespaceManager.RetrievePartitionFromPath(args.Path)
+	_, err := utils.ValidateFilenameStr(filename, args.Path)
 	if err != nil {
 		return err
 	}
@@ -464,7 +465,7 @@ func (ma *MasterServer) RPCGetChunkHandleHandler(
 		return err
 	}
 
-	var file *nsTree
+	var file *namespacemanager.NsTree
 
 	// Try to create the path if it created before it err
 	// We then try to get it instead
@@ -486,8 +487,8 @@ func (ma *MasterServer) RPCGetChunkHandleHandler(
 
 	file.Lock()
 	defer file.Unlock()
-	if args.Index == common.ChunkIndex(file.chunks) {
-		file.chunks++
+	if args.Index == common.ChunkIndex(file.Chunks) {
+		file.Chunks++
 		// Note: since one of the servers on creating chunk should be the
 		//  primary, the other 3 should be a replica.
 		addrs, err := ma.chunkServerManager.chooseServers(common.MinimumReplicationFactor + 1) // sample out of the servers we have
@@ -585,9 +586,9 @@ func (ma *MasterServer) RPCGetFileInfoHandler(
 
 	file.Lock()
 	defer file.Unlock()
-	reply.Chunks = file.chunks
-	reply.IsDir = file.isDir
-	reply.Length = file.length
+	reply.Chunks = file.Chunks
+	reply.IsDir = file.IsDir
+	reply.Length = file.Length
 	return nil
 }
 
@@ -602,14 +603,4 @@ func (ma *MasterServer) RPCGetReplicasHandler(
 		reply.Locations = append(reply.Locations, v)
 	})
 	return nil
-}
-
-func validateFilenameStr(filename string, p common.Path) (bool, error) {
-	switch filename {
-	case "", ".", "..":
-		return true, fmt.Errorf("path %s does not have a base file", p)
-	default:
-		break
-	}
-	return false, nil
 }
