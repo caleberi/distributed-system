@@ -1,4 +1,4 @@
-package shared
+package plotter
 
 import (
 	"image/color"
