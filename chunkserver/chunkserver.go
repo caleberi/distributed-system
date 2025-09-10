@@ -1353,6 +1353,20 @@ func calculateRoundTripProximity(duration int, masterAddr string) (float64, erro
 	return rrt, nil
 }
 
+// extractAverageRTT parses the output of a ping command to calculate the average round-trip time (RTT).
+// It uses a regular expression to extract RTT values (in milliseconds) from the input string, typically
+// the output of a ping command executed by calculateRoundTripProximity. The function is used in a
+// distributed storage system to support network latency measurements for failure detection or server
+// proximity calculations. It logs errors for invalid RTT values and returns the average RTT across all
+// valid matches. If no valid RTT values are found or parsing fails, it returns an error.
+//
+// Parameters:
+//   - input: The string output from a ping command containing RTT values (e.g., "time=12.34 ms").
+//
+// Returns:
+//   - A float64 representing the average RTT in milliseconds.
+//   - An error if no valid RTT values are found, the input is empty, or parsing fails.
+
 func extractAverageRTT(input string) (float64, error) {
 	re := regexp.MustCompile(`time=([\d.]+)\s*ms`)
 	matches := re.FindAllStringSubmatch(input, -1)
@@ -1367,4 +1381,10 @@ func extractAverageRTT(input string) (float64, error) {
 		total += v
 	}
 	return total / float64(cnt), nil
+}
+
+// isValidAddr checks if the address is a valid IP or hostname (basic validation).
+func isValidAddr(addr string) bool {
+	// Basic validation: non-empty and contains only allowed characters
+	return len(addr) > 0 && regexp.MustCompile(`^[a-zA-Z0-9.-]+$`).MatchString(addr)
 }
