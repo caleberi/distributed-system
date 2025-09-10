@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	dataFile = "./data/source.txt"
+	dataFile = "./source.txt"
 	zipExt   = ".gz"
 	timeout  = 5 * time.Second
 )
