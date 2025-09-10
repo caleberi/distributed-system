@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-from rich.console import Console
-from rich.columns import Columns
+from rich.console import Console # type: ignore
+from rich.columns import Columns # type: ignore
 from sys import stdin
-from plac import pos,flg,opt,call
+from plac import pos,flg,opt,call # type: ignore
 from typing import List
 
 D_TOPICS = {
