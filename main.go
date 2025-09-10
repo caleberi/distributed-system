@@ -8,9 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	chunkserver "github.com/caleberi/distributed-system/rfs/chunkserver"
-	"github.com/caleberi/distributed-system/rfs/common"
-	masterserver "github.com/caleberi/distributed-system/rfs/master_server"
+	chunkserver "github.com/caleberi/distributed-system/chunkserver"
+	"github.com/caleberi/distributed-system/common"
+	masterserver "github.com/caleberi/distributed-system/master_server"
 	"github.com/rs/zerolog"
 )
 

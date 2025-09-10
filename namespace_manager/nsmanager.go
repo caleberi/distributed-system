@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/caleberi/distributed-system/rfs/common"
-	"github.com/caleberi/distributed-system/rfs/utils"
+	"github.com/caleberi/distributed-system/common"
+	"github.com/caleberi/distributed-system/utils"
 )
 
 // SerializedNsTreeNode represents a serialized node in the namespace tree, used for persistence.

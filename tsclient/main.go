@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/caleberi/distributed-system/rfs/client"
-	"github.com/caleberi/distributed-system/rfs/common"
-	"github.com/caleberi/distributed-system/rfs/utils"
+	"github.com/caleberi/distributed-system/client"
+	"github.com/caleberi/distributed-system/common"
+	"github.com/caleberi/distributed-system/utils"
 	"github.com/rs/zerolog/log"
 )
 

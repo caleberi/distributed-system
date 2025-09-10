@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/caleberi/distributed-system/rfs/common"
-	"github.com/caleberi/distributed-system/rfs/rpc_struct"
-	"github.com/caleberi/distributed-system/rfs/shared"
-	"github.com/caleberi/distributed-system/rfs/utils"
+	"github.com/caleberi/distributed-system/common"
+	"github.com/caleberi/distributed-system/rpc_struct"
+	"github.com/caleberi/distributed-system/shared"
+	"github.com/caleberi/distributed-system/utils"
 	"github.com/rs/zerolog/log"
 )
 

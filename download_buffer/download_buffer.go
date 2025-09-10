@@ -36,7 +36,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/caleberi/distributed-system/rfs/common"
+	"github.com/caleberi/distributed-system/common"
 )
 
 // Buffer defines the interface for a thread-safe buffer that stores and manages

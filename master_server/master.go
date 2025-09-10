@@ -15,12 +15,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/caleberi/distributed-system/rfs/common"
-	filesystem "github.com/caleberi/distributed-system/rfs/file_system"
-	namespacemanager "github.com/caleberi/distributed-system/rfs/namespace_manager"
-	"github.com/caleberi/distributed-system/rfs/rpc_struct"
-	"github.com/caleberi/distributed-system/rfs/shared"
-	"github.com/caleberi/distributed-system/rfs/utils"
+	"github.com/caleberi/distributed-system/common"
+	filesystem "github.com/caleberi/distributed-system/file_system"
+	namespacemanager "github.com/caleberi/distributed-system/namespace_manager"
+	"github.com/caleberi/distributed-system/rpc_struct"
+	"github.com/caleberi/distributed-system/shared"
+	"github.com/caleberi/distributed-system/utils"
 	"github.com/rs/zerolog/log"
 )
 

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/caleberi/distributed-system/rfs/common"
+	"github.com/caleberi/distributed-system/common"
 	"github.com/rs/zerolog/log"
 )
 

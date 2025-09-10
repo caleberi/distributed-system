@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/caleberi/distributed-system/rfs/common"
-	filesystem "github.com/caleberi/distributed-system/rfs/file_system"
+	"github.com/caleberi/distributed-system/common"
+	filesystem "github.com/caleberi/distributed-system/file_system"
 )
 
 const ZIP_EXT = ".gz"

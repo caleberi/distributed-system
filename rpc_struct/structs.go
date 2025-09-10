@@ -3,8 +3,8 @@ package rpc_struct
 import (
 	"time"
 
-	"github.com/caleberi/distributed-system/rfs/common"
-	failuredetector "github.com/caleberi/distributed-system/rfs/failure_detector"
+	"github.com/caleberi/distributed-system/common"
+	failuredetector "github.com/caleberi/distributed-system/failure_detector"
 )
 
 type HeartBeatArg struct {

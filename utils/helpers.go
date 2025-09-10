@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 
-	"github.com/caleberi/distributed-system/rfs/common"
+	"github.com/caleberi/distributed-system/common"
 )
 
 func Map[T, V comparable](data []T, fn func(v T) V) []V {

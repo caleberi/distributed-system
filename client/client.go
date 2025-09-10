@@ -10,11 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/caleberi/distributed-system/rfs/common"
-	downloadbuffer "github.com/caleberi/distributed-system/rfs/download_buffer"
-	"github.com/caleberi/distributed-system/rfs/rpc_struct"
-	"github.com/caleberi/distributed-system/rfs/shared"
-	"github.com/caleberi/distributed-system/rfs/utils"
+	"github.com/caleberi/distributed-system/common"
+	downloadbuffer "github.com/caleberi/distributed-system/download_buffer"
+	"github.com/caleberi/distributed-system/rpc_struct"
+	"github.com/caleberi/distributed-system/shared"
+	"github.com/caleberi/distributed-system/utils"
 	"github.com/rs/zerolog/log"
 )
 
