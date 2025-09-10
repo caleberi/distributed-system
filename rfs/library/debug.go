@@ -1,4 +1,4 @@
-package lib
+package library
 
 import (
 	"fmt"
@@ -27,22 +27,22 @@ var debugStartTime time.Time
 var debugVerbosity int
 
 const (
-	dClient  debugTopic = "CLNT"
-	dCommit  debugTopic = "CMIT"
-	dDrop    debugTopic = "DROP"
-	dError   debugTopic = "ERROR"
-	dInfo    debugTopic = "INFO"
-	dLeader  debugTopic = "LEAD"
-	dLog     debugTopic = "LOG-1"
-	dLog2    debugTopic = "LOG_2"
-	dPersist debugTopic = "PERS"
-	dSnap    debugTopic = "SNAP"
-	dTerm    debugTopic = "TERM"
-	dTest    debugTopic = "TEST"
-	dTimer   debugTopic = "TIMER"
-	dTrace   debugTopic = "TRACE"
-	dVote    debugTopic = "VOTE"
-	dWarn    debugTopic = "WARN"
+	DClient  debugTopic = "CLNT"
+	DCommit  debugTopic = "CMIT"
+	DDrop    debugTopic = "DROP"
+	DError   debugTopic = "ERROR"
+	DInfo    debugTopic = "INFO"
+	DLeader  debugTopic = "LEAD"
+	DLog     debugTopic = "LOG-1"
+	DLog2    debugTopic = "LOG_2"
+	DPersist debugTopic = "PERS"
+	DSnap    debugTopic = "SNAP"
+	DTerm    debugTopic = "TERM"
+	DTest    debugTopic = "TEST"
+	DTimer   debugTopic = "TIMER"
+	DTrace   debugTopic = "TRACE"
+	DVote    debugTopic = "VOTE"
+	DWarn    debugTopic = "WARN"
 )
 
 func init() {

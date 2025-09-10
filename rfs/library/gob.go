@@ -1,4 +1,4 @@
-package lib
+package library
 
 import (
 	gob "encoding/gob"
@@ -14,12 +14,12 @@ var mu sync.Mutex
 var errorCount int // For test capital
 var checked map[reflect.Type]bool
 
-func Register(value interface{}) {
+func Register(value any) {
 	checkValue(value)
 	gob.Register(value)
 }
 
-func RegisterName(name string, value interface{}) {
+func RegisterName(name string, value any) {
 	checkValue(value)
 	gob.RegisterName(name, value)
 }
@@ -39,7 +39,7 @@ func NewEncoder(w io.Writer) *GEncoder {
 	return genco
 }
 
-func (genco *GEncoder) Encode(e interface{}) error {
+func (genco *GEncoder) Encode(e any) error {
 	checkValue(e)
 	return genco.gob.Encode(e)
 }
@@ -49,7 +49,7 @@ func (genco *GEncoder) EncodeValue(value reflect.Value) error {
 	return genco.gob.Encode(value)
 }
 
-func checkValue(t interface{}) {
+func checkValue(t any) {
 	checkType(reflect.TypeOf(t))
 }
 
@@ -110,13 +110,13 @@ func NewDecoder(w io.Reader) *GDecoder {
 	return gdeco
 }
 
-func (gdeco *GDecoder) Decode(e interface{}) error {
+func (gdeco *GDecoder) Decode(e any) error {
 	checkValue(e)
 	checkDefault(e)
 	return gdeco.gob.Decode(e)
 }
 
-func checkDefault(value interface{}) {
+func checkDefault(value any) {
 	if value == nil {
 		return
 	}
@@ -152,7 +152,7 @@ func checkDefaultHelper(value reflect.Value, depth int, name string) {
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
 		reflect.Uintptr, reflect.Float32, reflect.Float64,
 		reflect.String:
-		if reflect.DeepEqual(reflect.Zero(t).Interface(), value.Interface()) == false {
+		if !reflect.DeepEqual(reflect.Zero(t).Interface(), value.Interface()) {
 			mu.Lock()
 			if errorCount < 1 {
 				what := name
