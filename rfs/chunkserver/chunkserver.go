@@ -20,17 +20,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-	"github.com/rs/zerolog/log"
-
 	archivemanager "github.com/caleberi/distributed-system/rfs/archive_manager"
 	"github.com/caleberi/distributed-system/rfs/common"
 	downloadbuffer "github.com/caleberi/distributed-system/rfs/download_buffer"
 	failuredetector "github.com/caleberi/distributed-system/rfs/failure_detector"
 	filesystem "github.com/caleberi/distributed-system/rfs/file_system"
+	"github.com/caleberi/distributed-system/rfs/library"
 	"github.com/caleberi/distributed-system/rfs/rpc_struct"
 	"github.com/caleberi/distributed-system/rfs/shared"
 	"github.com/caleberi/distributed-system/rfs/utils"
+	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog/log"
 )
 
 // chunkInfo represents metadata for a chunk of data in a distributed file system.
@@ -343,6 +343,16 @@ func (cs *Server) archiveChunks() error {
 	return nil
 }
 
+// unarchiveChunks decompresses a specific chunk identified by its handle if it is compressed.
+// It checks if the chunk exists and is compressed, submits it for decompression, and updates its status.
+// The function is thread-safe, using a mutex to protect access to the chunk data.
+//
+// Parameters:
+//   - handle: The unique identifier for the chunk to decompress.
+//
+// Returns:
+//   - nil if the chunk is successfully decompressed or was not compressed.
+//   - An error if the chunk does not exist, decompression fails, or an issue occurs in the process.
 func (cs *Server) unarchiveChunks(handle common.ChunkHandle) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -367,18 +377,24 @@ func (cs *Server) unarchiveChunks(handle common.ChunkHandle) error {
 	return nil
 }
 
-// Loads meta data information into server memory
+// loadMetadata loads chunk metadata from a file and populates the server's chunk map.
+// It attempts to open the metadata file, creating it if it does not exist, and decodes the stored metadata.
+// Each metadata entry is used to restore chunk information in the server's chunk map.
+// The function is thread-safe, using a mutex to protect access to the chunk map.
+//
+// Returns:
+//   - nil if the metadata is successfully loaded or the file is empty (io.EOF).
+//   - An error if the file cannot be opened, created, or decoded, or if any other issue occurs.
 func (cs *Server) loadMetadata() error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
 	file, err := cs.rootDir.GetFile(common.ChunkMetaDataFileName, os.O_RDONLY, common.FileMode)
 	if err != nil {
-		var pathError *os.PathError
-		if errors.As(err, &pathError) {
+		if os.IsNotExist(err) {
 			err = cs.rootDir.CreateFile(common.ChunkMetaDataFileName)
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to create metadata file: %w", err)
 			}
 		}
 		file, err = cs.rootDir.GetFile(common.ChunkMetaDataFileName, os.O_RDONLY, common.FileMode)
@@ -386,26 +402,30 @@ func (cs *Server) loadMetadata() error {
 			return err
 		}
 	}
-	defer func(file *os.File) {
-		err := file.Close()
-		if err != nil {
-			log.Err(err).Stack().Send()
-			return
+	defer func() {
+		if err := file.Close(); err != nil {
+			log.Err(err).Msg("failed to close metadata file")
 		}
-	}(file)
+	}()
 
 	var metas []PersistedMetaData
-	decoder := gob.NewDecoder(file)
+	decoder := library.NewDecoder(file)
 	err = decoder.Decode(&metas)
 	if err != nil {
 		if !errors.Is(err, io.EOF) {
-			log.Printf("error occurred while loading metadata (%v)", err)
+			log.Err(err).Msg(fmt.Sprintf("Server %s failed to decode metadata", cs.ServerAddr))
 			return err
 		}
 	}
 
 	log.Info().Msg(fmt.Sprintf("Server %s found metas with length %d", cs.ServerAddr, len(metas)))
 	utils.ForEach(metas, func(m PersistedMetaData) {
+		if m.Length < 0 {
+			log.Warn().Msg(
+				fmt.Sprintf("Server %s skipping invalid metadata for chunk-%d: negative length",
+					cs.ServerAddr, m.Handle))
+			return
+		}
 		log.Info().Msg(fmt.Sprintf(
 			"Server %s restoring chunk-%d with version: %d length: %d",
 			cs.ServerAddr, m.Handle, m.Version, m.Length))
