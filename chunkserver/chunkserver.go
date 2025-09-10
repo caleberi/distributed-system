@@ -2,6 +2,7 @@ package chunkserver
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -775,38 +776,52 @@ func (cs *Server) RPCSysReportHandler(args rpc_struct.SysReportInfoArg, reply *r
 	return nil
 }
 
-// The master will detect that this chunkserver has a stale replica
-// when the chunkserver restarts and reports its set of chunks
-// and their associated version numbers. If the master sees a
-// version number greater than the one in its records, the master
-// assumes that it failed when granting the lease and so
-// takes the higher version to be up-to-date.
+// RPCCheckChunkVersionHandler verifies the version of a chunk against a provided version.
+// It checks if the chunk specified by args.Handle exists in the server's chunk map (cs.chunks)
+// and compares its version with the provided args.Version. If the chunk is one version behind,
+// it updates the chunk's version and last modified time, marking it as not stale. Otherwise,
+// the chunk is marked as abandoned and considered not stale. The function is used in a distributed
+// storage system to ensure chunk version consistency, likely called by the master server or other
+// servers during replication or coordination (e.g., in heartBeat). It is thread-safe, using a mutex
+// to protect access to cs.chunks during read and write operations. The result is returned in the
+// reply.Stale field, where false indicates the chunk is valid or updated.
+//
+// Parameters:
+//   - args: The RPC arguments containing the chunk handle (args.Handle) and version (args.Version).
+//   - reply: The RPC reply to populate with the staleness result (reply.Stale).
+//
+// Returns:
+//   - nil if the chunk version is successfully checked or the chunk does not exist.
+//   - Note: Errors are not currently returned, but invalid chunk data could warrant an error in future versions.
 func (cs *Server) RPCCheckChunkVersionHandler(args rpc_struct.CheckChunkVersionArg, reply *rpc_struct.CheckChunkVersionReply) error {
-	cs.mu.RLock()
+	cs.mu.Lock()
 	chinfo, ok := cs.chunks[args.Handle]
-	cs.mu.RUnlock()
+	cs.mu.Unlock()
 
 	if !ok {
+		log.Info().Msgf(
+			"Server %s: chunk %v not found, marking as stale",
+			cs.ServerAddr, args.Handle)
 		reply.Stale = true
 		return nil
 	}
-	// compare the version provided by the calling server with the server's own
-	// determining whether the version here is stale
 
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
-	// check if the cs is behind by 1
-	// synchronized cus we don't want the chinfo mutated while we
-	// yet to verify it staleness
 	if chinfo.version+common.ChunkVersion(1) == args.Version {
+		log.Info().Msgf(
+			"Server %s: chunk %v is one version behind, updating version",
+			cs.ServerAddr, args.Handle)
 		reply.Stale = false
 		chinfo.lastModified = time.Now()
-		chinfo.version++ // advance the version by 1
+		chinfo.version++
 		return nil
 	}
 
-	log.Printf("%v :  stale chunk %v", cs.ServerAddr, chinfo)
+	log.Warn().Msgf(
+		"Server %s: chunk %v is stale: local version %v, expected %v",
+		cs.ServerAddr, args.Handle, chinfo.version, args.Version)
 	chinfo.abandoned = true
 	chinfo.lastModified = time.Now()
 	reply.Stale = false
@@ -915,7 +930,10 @@ func (cs *Server) RPCWriteChunkHandler(args rpc_struct.WriteChunkArgs, reply *rp
 
 	// calculate the next offset from the prevous cursor position
 	// assumption is that the data in the buffer is greated than 64 << 20
-	dataSize := bToMb(uint64(args.Offset) + uint64(len(data)))
+	dataSize, err := utils.BToMb(uint64(args.Offset) + uint64(len(data)))
+	if err != nil {
+		return err
+	}
 	if dataSize > common.ChunkMaxSizeInMb {
 		return fmt.Errorf("provided data size for write action [%v] is larger than the max allowed data size of %v mb",
 			args.DownloadBufferId, common.ChunkMaxSizeInMb)
@@ -1035,13 +1053,16 @@ func (cs *Server) RPCApplyMutationHandler(args rpc_struct.ApplyMutationArgs, rep
 
 	// calculate the next offset from the previous cursor position
 	// assumption is that the data in the buffer is greater than 64 << 20
-	dataSize := bToMb(uint64(args.Offset) + uint64(len(data)))
+	dataSize, err := utils.BToMb(uint64(args.Offset) + uint64(len(data)))
+	if err != nil {
+		return err
+	}
 	if dataSize > common.ChunkMaxSizeInMb {
 		return fmt.Errorf("provided data size for append action [%v] is larger than the max allowed data size of %v mb", args.DownloadBufferId, common.ChunkMaxSizeInMb)
 	}
 
 	handle := args.DownloadBufferId.Handle
-	err := cs.unarchiveChunks(handle)
+	err = cs.unarchiveChunks(handle)
 	if err != nil {
 		return err
 	}
@@ -1095,7 +1116,10 @@ func (cs *Server) RPCAppendChunkHandler(args rpc_struct.AppendChunkArgs, reply *
 	var mutationType common.MutationType
 	offset := chInfo.length
 	newLength := chInfo.length + common.Offset(len(data))
-	dataSize := bToMb(uint64(newLength))
+	dataSize, err := utils.BToMb(uint64(newLength))
+	if err != nil {
+		return err
+	}
 
 	if dataSize > common.ChunkMaxSizeInMb {
 		mutationType = common.MutationPad
