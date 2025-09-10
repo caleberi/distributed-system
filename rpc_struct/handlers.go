@@ -10,6 +10,7 @@ const (
 	MRPCRenameHandler                            = "MasterServer.RPCRenameHandler"
 	MRPCGetFileInfoHandler                       = "MasterServer.RPCGetFileInfoHandler"
 	MRPCGetReplicasHandler                       = "MasterServer.RPCGetReplicasHandler"
+	MRPCHeartBeatHandler                         = "MasterServer.RPCHeartBeatHandler"
 
 	CRPCReadChunkHandler   = "ChunkServer.RPCReadChunkHandler"
 	CRPCForwardDataHandler = "ChunkServer.RPCForwardDataHandler"
