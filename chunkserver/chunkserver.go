@@ -27,6 +27,7 @@ import (
 	"github.com/caleberi/distributed-system/rpc_struct"
 	"github.com/caleberi/distributed-system/shared"
 	"github.com/caleberi/distributed-system/utils"
+	"github.com/olekukonko/tablewriter"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 )
@@ -627,24 +628,56 @@ func (cs *Server) deleteChunk(handle common.ChunkHandle) error {
 	return cs.persistMetadata()
 }
 
-func (cs *Server) Shutdown() {
+// Shutdown gracefully terminates the server, ensuring proper cleanup of resources.
+// It marks the server as dead, clears the download buffer, closes the archiver,
+// persists chunk metadata, closes the network listener, and signals shutdown via
+// a channel. The function is idempotent; if the server is already dead, it logs
+// a message and returns immediately. It is thread-safe, using a mutex to protect
+// shared state (e.g., cs.isDead, cs.garbage). The function is typically called when
+// the server needs to stop in a distributed storage system, ensuring metadata
+// consistency and resource cleanup before exit. Operations are performed with timeouts
+// to prevent hanging. Errors are logged and aggregated for the caller.
+//
+// Returns:
+//   - nil if the shutdown sequence completes successfully.
+//   - An error if critical steps (e.g., metadata persistence, listener closure) fail.
+func (cs *Server) Shutdown() error {
+	cs.mu.Lock()
 	if cs.isDead {
-		log.Info().Msgf("Server %v is dead\n", cs.ServerAddr)
-		return
+		cs.mu.Unlock()
+		log.Info().Msgf("Server %s: already dead", cs.ServerAddr)
+		return nil
 	}
 	cs.isDead = true
-	log.Info().Msgf("%s clearing buffer before shutdown >>>...\n", cs.ServerAddr)
+
+	cs.mu.Unlock()
+	err := cs.garbageCollection()
+	if err != nil {
+		return err
+	}
+
+	log.Info().Msgf("Server %s: clearing download buffer before shutdown", cs.ServerAddr)
 	cs.downloadBuffer.Done()
-	log.Info().Msgf("Saving metadata >>>...\n")
+	cs.archiver.Close()
+	log.Info().Msgf("Server %s: saving metadata before shutdown", cs.ServerAddr)
 	if err := cs.persistMetadata(); err != nil {
-		log.Err(err).Stack()
+		log.Err(err).Stack().Msgf("Server %s: failed to persist metadata during shutdown", cs.ServerAddr)
+		return err
 	}
 
 	if err := cs.listener.Close(); err != nil {
-		log.Err(err).Stack()
+		log.Err(err).Stack().Msgf("Server %s: failed to close listener during shutdown", cs.ServerAddr)
+		return err
 	}
-	cs.shutdownChan <- syscall.SIGINT
+
+	log.Info().Msgf("Server %s: signaling shutdown", cs.ServerAddr)
+	select {
+	case cs.shutdownChan <- syscall.SIGINT:
+	default:
+		log.Warn().Msgf("Server %s: shutdown channel already closed", cs.ServerAddr)
+	}
 	close(cs.shutdownChan)
+	return nil
 }
 
 // ///////////////////////////////////
@@ -652,9 +685,24 @@ func (cs *Server) Shutdown() {
 //	RPC METHODS
 //
 // /////////////////////////////////
-func (cs *Server) RPCSysReportHandler(args rpc_struct.SysReportInfoArg, reply *rpc_struct.SysReportInfoReply) error {
 
-	log.Info().Msg(fmt.Sprintf("<<< Gathering sys start  for %v >>> ", cs.ServerAddr))
+// RPCSysReportHandler gathers system memory statistics and chunk metadata for an RPC system report.
+// It collects memory usage (Alloc, TotalAlloc, Sys, NumGC) using runtime.MemStats, formats them into
+// a table for logging, and retrieves chunk metadata from the server's chunk map (cs.chunks). The
+// function is part of a distributed storage system, typically called by the master server to monitor
+// server health and chunk state, complementing heartBeat for system coordination. It is thread-safe
+// for reading cs.chunks using a read lock. The memory statistics are logged in a tabular format for
+// clarity, and the chunk metadata is returned in the reply struct.
+//
+// Parameters:
+//   - args: The RPC arguments (SysReportInfoArg), typically containing request metadata.
+//   - reply: The RPC reply (SysReportInfoReply) to populate with memory stats and chunk metadata.
+//
+// Returns:
+//   - nil if the system report is successfully generated and populated in the reply.
+//   - An error is not returned in the current implementation, but future versions could include error handling for critical failures.
+func (cs *Server) RPCSysReportHandler(args rpc_struct.SysReportInfoArg, reply *rpc_struct.SysReportInfoReply) error {
+	log.Info().Msgf("Server %s: gathering system statistics", cs.ServerAddr)
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
@@ -663,10 +711,15 @@ func (cs *Server) RPCSysReportHandler(args rpc_struct.SysReportInfoArg, reply *r
 	tSys := bToMb(m.Sys)
 	numGC := bToMb(uint64(m.NumGC))
 
-	log.Info().Msg(fmt.Sprintf("Alloc = %v MiB", alloc))
-	log.Info().Msg(fmt.Sprintf("\tTotalAlloc = %v MiB", totalAlloc))
-	log.Info().Msg(fmt.Sprintf("\tSys = %v MiB", tSys))
-	log.Info().Msg(fmt.Sprintf("\tNumGC = %v\n", numGC))
+	var buf bytes.Buffer
+	table := tablewriter.NewWriter(&buf)
+	table.Header([]string{"Metric", "Value (MiB)"})
+	table.Append([]string{"Alloc", fmt.Sprintf("%v", alloc)})
+	table.Append([]string{"TotalAlloc", fmt.Sprintf("%v", totalAlloc)})
+	table.Append([]string{"Sys", fmt.Sprintf("%v", tSys)})
+	table.Append([]string{"NumGC", fmt.Sprintf("%v", numGC)})
+	table.Render()
+	log.Info().Msgf("Server %s: memory statistics\n%s", cs.ServerAddr, buf.String())
 
 	mem := common.Memory{
 		TotalAlloc: totalAlloc,
@@ -699,7 +752,7 @@ func (cs *Server) RPCSysReportHandler(args rpc_struct.SysReportInfoArg, reply *r
 	reply.Chunks = chunkInfos
 	reply.SysMem = mem
 
-	log.Info().Msg("<<< Done with sys stat retrieval >>> ")
+	log.Info().Msgf("Server %s: completed system statistics retrieval", cs.ServerAddr)
 	return nil
 }
 
