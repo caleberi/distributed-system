@@ -128,9 +128,13 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 		return nil, err
 	}
 	fs := filesystem.NewFileSystem(root)
+	proximity, err := calculateRoundTripProximity(15, string(masterAddr))
+	if err != nil {
+		return nil, err
+	}
 	machineInfo := common.MachineInfo{
 		Hostname:               hostname,
-		RoundTripProximityTime: calculateRoundTripProximity(15, string(masterAddr)),
+		RoundTripProximityTime: proximity,
 	}
 
 	failureDetector, err := failuredetector.NewFailureDetector(
@@ -1310,13 +1314,31 @@ func (cs *Server) readChunk(handle common.ChunkHandle, offset common.Offset, dat
 	return n, err
 }
 
-func bToMb(b uint64) uint64 {
-	return b / 1024 / 1024
-}
-
-func calculateRoundTripProximity(duration int, masterAddr string) float64 {
+// calculateRoundTripProximity measures the average round-trip time (RTT) to a master server.
+// It executes a system ping command to the specified master address for a given duration (number of pings),
+// extracts the average RTT from the output, and returns it in milliseconds. The function is used in a
+// distributed storage system to assess network latency, likely for failure detection or server proximity
+// calculations (e.g., in heartBeat). It uses a context with a timeout to prevent hanging and sanitizes the
+// master address to avoid command injection. If the ping or RTT extraction fails, it logs the error and
+// returns an error to the caller. The function is not thread-safe and relies on system commands, which may
+// not be portable.
+//
+// Parameters:
+//   - ctx: The context to control timeout and cancellation.
+//   - duration: The number of ping attempts to make.
+//   - masterAddr: The address of the master server to ping.
+//
+// Returns:
+//   - A float64 representing the average round-trip time in milliseconds.
+//   - An error if the ping command fails, the address is invalid, or RTT extraction fails.
+func calculateRoundTripProximity(duration int, masterAddr string) (float64, error) {
+	if !isValidAddr(masterAddr) {
+		return 0.0, fmt.Errorf("invalid master address: %s", masterAddr)
+	}
 	var buffer bytes.Buffer
-	cmd := exec.Command("ping", "-c", fmt.Sprintf("%d", duration), masterAddr)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(duration+5)*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ping", "-c", fmt.Sprintf("%d", duration), masterAddr)
 	cmd.Stdout = &buffer
 	if cmd.Run() != nil {
 		buffer.Reset()
@@ -1328,7 +1350,7 @@ func calculateRoundTripProximity(duration int, masterAddr string) float64 {
 	if err != nil {
 		log.Printf("error extracting average round-trip time: %v", err)
 	}
-	return rrt
+	return rrt, nil
 }
 
 func extractAverageRTT(input string) (float64, error) {
