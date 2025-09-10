@@ -2,7 +2,6 @@ package chunkserver
 
 import (
 	"bytes"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"io"
@@ -11,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -511,9 +509,17 @@ func (cs *Server) heartBeat() error {
 	return nil
 }
 
+// persistMetadata writes the server's chunk metadata to a file.
+// It iterates over the server's chunk map, constructs metadata entries, and encodes them to the specified file.
+// The function is thread-safe for reading the chunk map using a read lock, but callers must ensure no concurrent writes
+// to the file occur. The file is opened in read-write mode, and any errors during file operations or encoding are returned.
+//
+// Returns:
+//   - nil if the metadata is successfully written to the file.
+//   - An error if the file cannot be opened, written, or encoded, or if any other issue occurs.
 func (cs *Server) persistMetadata() error {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
 
 	log.Info().Msg("<<< persisting metadata to file >>> ")
 	file, err := cs.rootDir.GetFile(common.ChunkMetaDataFileName, os.O_RDWR, common.FileMode)
@@ -523,7 +529,7 @@ func (cs *Server) persistMetadata() error {
 	defer func(file *os.File) {
 		err := file.Close()
 		if err != nil {
-			log.Err(err).Stack()
+			log.Err(err).Stack().Msg(fmt.Sprintf("Server %s failed to close metadata file", cs.ServerAddr))
 		}
 	}(file)
 
@@ -531,7 +537,7 @@ func (cs *Server) persistMetadata() error {
 
 	for handle, ch := range cs.chunks {
 		persistMetadata := PersistedMetaData{
-			ChunkSize:       int64(reflect.TypeOf(ch.mutations).Size()) / 1024, // in KB
+			ChunkSize:       int64(len(ch.mutations)) / 1024, // in KB
 			Mutations:       ch.mutations,
 			Version:         ch.version,
 			CreationTime:    ch.creationTime,
@@ -539,7 +545,7 @@ func (cs *Server) persistMetadata() error {
 			Abandoned:       ch.abandoned,
 			Replication:     ch.replication,
 			ServerStatus:    ch.serverStatus,
-			MetadataVersion: time.Now().Second(),
+			MetadataVersion: int(time.Now().UnixNano()),
 			Length:          ch.length,
 			Handle:          handle,
 			Checksum:        ch.checksum,
@@ -548,33 +554,77 @@ func (cs *Server) persistMetadata() error {
 		}
 		metadatas = append(metadatas, persistMetadata)
 	}
-	log.Printf("Server %v : store metadata len: %v", cs.ServerAddr, len(metadatas))
-	encoder := gob.NewEncoder(file)
+	log.Info().Msgf("Server %v : store metadata len: %v", cs.ServerAddr, len(metadatas))
+	encoder := library.NewEncoder(file)
 	return encoder.Encode(metadatas)
 }
 
+// garbageCollection removes chunks marked for deletion from the server's storage.
+// It processes the server's garbage list (cs.garbage), which contains chunk handles
+// identified for removal (e.g., via heartBeat coordination with the master server).
+// Each chunk handle is popped from the list and deleted using deleteChunk. Errors
+// during deletion are logged but do not stop the process, ensuring all garbage
+// entries are processed. The function is not thread-safe; callers must ensure no
+// concurrent access to cs.garbage or cs.chunks occurs. This function is typically
+// called periodically to reclaim storage space in a distributed storage system.
+//
+// Returns:
+//   - nil, as errors during deletion are logged but not returned to allow complete
+//     processing of the garbage list.
+//   - Note: Individual deletion errors are logged for debugging.
 func (cs *Server) garbageCollection() error {
-	// https://chat.openai.com/c/670528fb-ee6a-4684-8b14-0c9e68366be0
-	log.Info().Msg("::: Doing some garabage collection >>> ")
+	log.Info().Msg("::: Doing some garbage collection >>> ")
 	for cs.garbage.Length() > 0 {
 		handle := cs.garbage.PopFront()
 		err := cs.deleteChunk(handle)
 		if err != nil {
-			log.Err(err).Stack()
+			log.Err(err).Stack().Msg(fmt.Sprintf("Server %s: failed to delete chunk %v", cs.ServerAddr, handle))
+			return err
 		}
 	}
 	return nil
 }
 
+// deleteChunk removes a specified chunk from the server's storage and chunk map.
+// It deletes the chunk's file (compressed or uncompressed) from the filesystem and
+// removes the corresponding entry from the server's chunk map (cs.chunks). The function
+// is thread-safe, using a mutex to protect access to cs.chunks. It is typically called
+// by garbageCollection to process chunks marked for deletion (e.g., via heartBeat coordination
+// with the master server) in a distributed storage system. If the chunk does not exist in
+// cs.chunks, the function returns nil, allowing idempotent deletion.
+//
+// Parameters:
+//   - handle: The unique identifier for the chunk to delete.
+//
+// Returns:
+//   - nil if the chunk is successfully deleted or does not exist.
+//   - An error if the chunk's file cannot be removed from the filesystem.
 func (cs *Server) deleteChunk(handle common.ChunkHandle) error {
 	cs.mu.Lock()
-	delete(cs.chunks, handle)
-	cs.mu.Unlock()
-	err := cs.rootDir.RemoveFile(fmt.Sprintf(common.ChunkFileNameFormat, handle))
-	if err == nil {
+	chunkInfo, exists := cs.chunks[handle]
+	if !exists {
+		cs.mu.Unlock()
+		log.Info().Msg(fmt.Sprintf("Server %s: chunk %v not found, skipping deletion", cs.ServerAddr, handle))
 		return nil
 	}
-	return cs.rootDir.RemoveFile(fmt.Sprintf(common.ChunkFileNameFormat, handle) + archivemanager.ZIP_EXT)
+	if chunkInfo.length < 0 {
+		delete(cs.chunks, handle)
+		cs.mu.Unlock()
+		return fmt.Errorf("server %s: invalid chunk %v: negative length", cs.ServerAddr, handle)
+	}
+	delete(cs.chunks, handle)
+	cs.mu.Unlock()
+
+	filename := fmt.Sprintf(common.ChunkFileNameFormat, handle)
+	if chunkInfo.isCompressed {
+		filename += archivemanager.ZIP_EXT
+	}
+	err := cs.rootDir.RemoveFile(filename)
+	if err != nil {
+		return err
+	}
+
+	return cs.persistMetadata()
 }
 
 func (cs *Server) Shutdown() {
