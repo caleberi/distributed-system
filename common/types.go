@@ -75,10 +75,10 @@ type PersistedChunkInfo struct {
 	StatusFlags          []string  // Flags indicating the status of the chunk
 }
 type Memory struct {
-	Alloc      uint64
-	TotalAlloc uint64
-	Sys        uint64
-	NumGC      uint64
+	Alloc      float64
+	TotalAlloc float64
+	Sys        float64
+	NumGC      float64
 }
 
 type FileInfo struct {
