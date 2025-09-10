@@ -343,7 +343,7 @@ func (cs *Server) archiveChunks() error {
 	return nil
 }
 
-func (cs *Server) decompressCompressedChunk(handle common.ChunkHandle) error {
+func (cs *Server) unarchiveChunks(handle common.ChunkHandle) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -354,7 +354,7 @@ func (cs *Server) decompressCompressedChunk(handle common.ChunkHandle) error {
 
 	if chunkInfo.isCompressed {
 		filename := fmt.Sprintf(common.ChunkFileNameFormat+archivemanager.ZIP_EXT, handle)
-		cs.archiver.DecompressPipeline.Task <- common.Path(filename)
+		cs.archiver.SubmitDecompress(common.Path(filename))
 		result := <-cs.archiver.DecompressPipeline.Result
 		if result.Err != nil {
 			log.Err(result.Err).Stack().Msg(string(result.Path) + " : " + result.Err.Error())
@@ -783,7 +783,7 @@ func doWriteOperation(args rpc_struct.WriteChunkArgs, cs *Server, data []byte) e
 		cs.mu.RUnlock()
 		log.Info().Msgf("writing to chunk %v : %#v", handle, chInfo)
 		if ok && chInfo.isCompressed {
-			err := cs.decompressCompressedChunk(handle)
+			err := cs.unarchiveChunks(handle)
 			if err != nil {
 				errCh <- err
 				return
@@ -876,7 +876,7 @@ func (cs *Server) RPCApplyMutationHandler(args rpc_struct.ApplyMutationArgs, rep
 	}
 
 	handle := args.DownloadBufferId.Handle
-	err := cs.decompressCompressedChunk(handle)
+	err := cs.unarchiveChunks(handle)
 	if err != nil {
 		return err
 	}
@@ -918,7 +918,7 @@ func (cs *Server) RPCAppendChunkHandler(args rpc_struct.AppendChunkArgs, reply *
 	cs.mu.RUnlock()
 
 	if chInfo.isCompressed {
-		err := cs.decompressCompressedChunk(handle)
+		err := cs.unarchiveChunks(handle)
 		if err != nil {
 			return err
 		}
@@ -995,7 +995,7 @@ func (cs *Server) RPCGetSnapshotHandler(args rpc_struct.GetSnapshotArgs, reply *
 		return fmt.Errorf("chunk %v does not exist or is abandoned", handle)
 	}
 
-	err := cs.decompressCompressedChunk(handle)
+	err := cs.unarchiveChunks(handle)
 	if err != nil {
 		return err
 	}
@@ -1021,7 +1021,7 @@ func (cs *Server) RPCGetSnapshotHandler(args rpc_struct.GetSnapshotArgs, reply *
 
 func (cs *Server) RPCApplyCopyHandler(args rpc_struct.ApplyCopyArgs, reply *rpc_struct.AppendChunkReply) error {
 	handle := args.Handle
-	err := cs.decompressCompressedChunk(handle)
+	err := cs.unarchiveChunks(handle)
 	if err != nil {
 		return err
 	}
