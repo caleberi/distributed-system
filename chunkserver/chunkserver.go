@@ -706,10 +706,22 @@ func (cs *Server) RPCSysReportHandler(args rpc_struct.SysReportInfoArg, reply *r
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
-	alloc := bToMb(m.Alloc)
-	totalAlloc := bToMb(m.TotalAlloc)
-	tSys := bToMb(m.Sys)
-	numGC := bToMb(uint64(m.NumGC))
+	alloc, err := utils.BToMb(m.Alloc)
+	if err != nil {
+		return err
+	}
+	totalAlloc, err := utils.BToMb(m.TotalAlloc)
+	if err != nil {
+		return err
+	}
+	tSys, err := utils.BToMb(m.Sys)
+	if err != nil {
+		return err
+	}
+	numGC, err := utils.BToMb(uint64(m.NumGC))
+	if err != nil {
+		return err
+	}
 
 	var buf bytes.Buffer
 	table := tablewriter.NewWriter(&buf)
@@ -718,7 +730,10 @@ func (cs *Server) RPCSysReportHandler(args rpc_struct.SysReportInfoArg, reply *r
 	table.Append([]string{"TotalAlloc", fmt.Sprintf("%v", totalAlloc)})
 	table.Append([]string{"Sys", fmt.Sprintf("%v", tSys)})
 	table.Append([]string{"NumGC", fmt.Sprintf("%v", numGC)})
-	table.Render()
+	err = table.Render()
+	if err != nil {
+		return err
+	}
 	log.Info().Msgf("Server %s: memory statistics\n%s", cs.ServerAddr, buf.String())
 
 	mem := common.Memory{

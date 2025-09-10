@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"math/rand"
 
 	"github.com/caleberi/distributed-system/common"
@@ -178,4 +179,22 @@ func ValidateFilenameStr(filename string, p common.Path) (bool, error) {
 		break
 	}
 	return false, nil
+}
+
+// BToMb converts bytes to megabytes with floating-point precision.
+// It divides the input bytes by 1024*1024 to convert to megabytes, used in the distributed storage system
+// to report memory statistics (e.g., in RPCSysReportHandler). The function ensures non-negative input and
+// returns a floating-point value to preserve precision, avoiding truncation from integer division.
+//
+// Parameters:
+//   - b: The number of bytes to convert (non-negative uint64).
+//
+// Returns:
+//   - A float64 representing the number of megabytes.
+//   - An error if the input is too large (unlikely with uint64).
+func BToMb(b uint64) (float64, error) {
+	if b > math.MaxUint64/1024/1024 {
+		return 0.0, fmt.Errorf("input too large: %d", b)
+	}
+	return float64(b) / (1024 * 1024), nil
 }
