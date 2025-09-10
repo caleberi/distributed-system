@@ -61,7 +61,7 @@ type chunkInfo struct {
 // chunk metadata, leases, and system resources. It handles network communication,
 // failure detection, and garbage collection for chunks.
 type Server struct {
-	mu       sync.RWMutex // mutex for synchronizing access to server state
+	mu, lmu  sync.RWMutex // mutex for synchronizing access to server state
 	listener net.Listener // network listener for incoming connections
 
 	rootDir *filesystem.FileSystem     // root directory file system for chunk storage
@@ -443,14 +443,27 @@ func (cs *Server) loadMetadata() error {
 	return nil
 }
 
+// heartBeat sends a heartbeat to the master server to report the server's status and receive updates.
+// It constructs a heartbeat request with the server's address and machine info, optionally requesting
+// lease extensions if active leases exist. The function records network data for failure prediction,
+// updates leases and garbage collection lists based on the reply, and logs the failure prediction result.
+// The function is not thread-safe for the leases and garbage lists; callers must ensure proper synchronization.
+//
+// Returns:
+//   - nil if the heartbeat is successfully sent, processed, and failure prediction is recorded.
+//   - An error if the RPC call fails, network data recording fails, or failure prediction fails.
 func (cs *Server) heartBeat() error {
 	arg := rpc_struct.HeartBeatArg{
 		Address:     cs.ServerAddr,
 		MachineInfo: cs.MachineInfo,
 	}
+
+	cs.mu.Lock()
 	if cs.leases.Length() != 0 {
 		arg.ExtendLease = true
 	}
+	cs.mu.Unlock()
+
 	var reply rpc_struct.HeartBeatReply
 	reply.NetworkData = failuredetector.NetworkData{
 		RoundTrip: 0,
@@ -458,33 +471,43 @@ func (cs *Server) heartBeat() error {
 			SentAt: time.Now(),
 		},
 	}
-	if err := shared.UnicastToRPCServer(
-		string(cs.MasterAddr),
-		"MasterServer.RPCHeartBeatHandler",
-		arg, &reply); err != nil {
-		log.Err(err).Stack().Msg("cannot call MasterServer.RPCHeartBeatHandler")
+	if err := shared.UnicastToRPCServer(string(cs.MasterAddr),
+		rpc_struct.MRPCHeartBeatHandler, arg, &reply); err != nil {
 		return err
 	}
+
 	reply.NetworkData.BackwardTrip.ReceivedAt = time.Now()
-	err := cs.failureDetector.RecordSample(reply.NetworkData)
-	if err != nil {
+
+	if err := cs.failureDetector.RecordSample(reply.NetworkData); err != nil {
 		log.Err(err).Stack().Msg("err storing network data for prediction")
 		return err
 	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
-		utils.ForEach(reply.LeaseExtensions, func(lease *common.Lease) {
-			cs.leases.PushBack(lease)
-		})
+		defer wg.Done()
+		if reply.LeaseExtensions != nil {
+			cs.lmu.Lock()
+			utils.ForEach(reply.LeaseExtensions, func(lease *common.Lease) {
+				cs.leases.PushBack(lease)
+			})
+			cs.lmu.Unlock()
+		}
+
+		if reply.Garbage != nil {
+			utils.ForEach(reply.Garbage, func(handle common.ChunkHandle) {
+				cs.garbage.PushBack(handle)
+			})
+		}
 	}()
-	utils.ForEach(reply.Garbage, func(handle common.ChunkHandle) {
-		cs.garbage.PushBack(handle)
-	})
 
 	prediction, err := cs.failureDetector.PredictFailure()
 	if err != nil {
-		log.Err(err).Stack().Msg("")
+		return err
 	}
 	log.Info().Msgf("server=%s prediction=%.2f  message=%s", cs.ServerAddr, prediction.Phi, prediction.Message)
+	wg.Wait()
 	return nil
 }
 
