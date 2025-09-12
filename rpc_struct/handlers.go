@@ -12,8 +12,13 @@ const (
 	MRPCGetReplicasHandler                       = "MasterServer.RPCGetReplicasHandler"
 	MRPCHeartBeatHandler                         = "MasterServer.RPCHeartBeatHandler"
 
-	CRPCReadChunkHandler   = "ChunkServer.RPCReadChunkHandler"
-	CRPCForwardDataHandler = "ChunkServer.RPCForwardDataHandler"
-	CRPCWriteChunkHandler  = "ChunkServer.RPCWriteChunkHandler"
-	CRPCAppendChunkHandler = "ChunkServer.RPCAppendChunkHandler"
+	CRPCReadChunkHandler         = "ChunkServer.RPCReadChunkHandler"
+	CRPCForwardDataHandler       = "ChunkServer.RPCForwardDataHandler"
+	CRPCWriteChunkHandler        = "ChunkServer.RPCWriteChunkHandler"
+	CRPCAppendChunkHandler       = "ChunkServer.RPCAppendChunkHandler"
+	CRPCSysReportHandler         = "ChunkServer.RPCSysReportHandler"
+	CRPCCheckChunkVersionHandler = "ChunkServer.RPCCheckChunkVersionHandler"
+	CRPCCreateChunkHandler       = "ChunkServer.RPCCreateChunkHandler"
+	CRPCApplyMutationHandler     = "ChunkServer.RPCApplyMutationHandler"
+	CRPCApplyCopyHandler         = "ChunkServer.RPCApplyCopyHandler"
 )
