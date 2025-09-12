@@ -55,15 +55,16 @@ func (csm *CSManager) getReplicas(handle common.ChunkHandle) ([]common.ServerAdd
 	return chunkInfo.locations, nil
 }
 
-func (csm *CSManager) getGarbages() []common.ChunkHandle {
-	csm.RLock()
-	defer csm.RUnlock()
-	garbageChunks := make([]common.ChunkHandle, 0)
-	for _, srv := range csm.servers {
-		garbageChunks = append(garbageChunks, srv.garbages...)
-	}
-	return garbageChunks
-}
+//	func (csm *CSManager) getGarbages() []common.ChunkHandle {
+//		csm.RLock()
+//		defer csm.RUnlock()
+//		garbageChunks := make([]common.ChunkHandle, 0)
+//		for _, srv := range csm.servers {
+//			garbageChunks = append(garbageChunks, srv.garbages...)
+//		}
+//		return garbageChunks
+//	}
+
 func (csm *CSManager) registerReplicas(handle common.ChunkHandle, addr common.ServerAddr, readLock bool) error {
 	var (
 		chunkInfo *chunkInfo
@@ -74,10 +75,6 @@ func (csm *CSManager) registerReplicas(handle common.ChunkHandle, addr common.Se
 		csm.chunkMutex.RLock()
 		chunkInfo, ok = csm.chunks[handle]
 		csm.chunkMutex.RUnlock()
-
-		//  not necessary since the chunk has been locked outside
-		// csm.Lock()
-		// defer csm.Unlock()
 	} else {
 		csm.Lock()
 		defer csm.Unlock()
@@ -89,7 +86,7 @@ func (csm *CSManager) registerReplicas(handle common.ChunkHandle, addr common.Se
 	}
 
 	chunkInfo.locations = append(chunkInfo.locations, addr)
-	log.Info().Msgf("Registering replicas for handle=%v with location=%v data=%v", handle, chunkInfo.locations, chunkInfo)
+	log.Info().Msgf("Registering replicas for handle=%v\n with location=%v\n data=%#v", handle, chunkInfo.locations, chunkInfo)
 	return nil
 }
 
@@ -97,17 +94,13 @@ func (csm *CSManager) detectDeadServer() []common.ServerAddr {
 	csm.serverMutex.Lock()
 	defer csm.serverMutex.Unlock()
 
-	var ret []common.ServerAddr
+	deadServers := make([]common.ServerAddr, 0, len(csm.servers))
 	for serverAddr, chk := range csm.servers {
-		if time.Now().After(chk.lastHeatBeat.Add(common.ServerHealthCheckTimeout)) {
-			ret = append(ret, serverAddr)
+		if chk.lastHeatBeat.IsZero() || time.Now().After(chk.lastHeatBeat.Add(common.ServerHealthCheckTimeout)) {
+			deadServers = append(deadServers, serverAddr)
 		}
 	}
-
-	log.Print("===== DEAD SERVERS =====\n")
-	utils.ForEach(ret, func(v common.ServerAddr) { log.Printf(">. %v", v) })
-	log.Print("===== DEAD SERVERS =====\n")
-	return ret
+	return deadServers
 }
 
 func (csm *CSManager) removeChunks(handles []common.ChunkHandle, server common.ServerAddr) error {
@@ -160,7 +153,9 @@ func (csm *CSManager) removeServer(addr common.ServerAddr) ([]common.ChunkHandle
 	}
 
 	var handles []common.ChunkHandle
-	utils.LoopOverMap(chk.chunks, func(handle common.ChunkHandle, _ bool) { handles = append(handles, handle) })
+	utils.LoopOverMap(chk.chunks, func(handle common.ChunkHandle, _ bool) {
+		handles = append(handles, handle)
+	})
 
 	delete(csm.servers, addr)
 	return handles, nil
@@ -401,16 +396,17 @@ func (csm *CSManager) createChunk(path common.Path, addrs []common.ServerAddr) (
 	}
 	csm.chunks[currentHandle] = chk // record the chunk on the master for later persistence
 
-	errs := []string{}
+	errs := []error{}
 	success := []string{}
 
 	args := rpc_struct.CreateChunkArgs{Handle: currentHandle}
 
 	utils.ForEach(addrs, func(addr common.ServerAddr) {
 		var reply rpc_struct.CreateChunkReply
-		err := shared.UnicastToRPCServer(string(addr), "ChunkServer.RPCCreateChunkHandler", args, &reply)
+		err := shared.UnicastToRPCServer(
+			string(addr), rpc_struct.CRPCCreateChunkHandler, args, &reply)
 		if err != nil {
-			errs = append(errs, err.Error())
+			errs = append(errs, err)
 		} else {
 			// update this particular chunk information before handing it o
 			chk.Lock()
@@ -422,14 +418,14 @@ func (csm *CSManager) createChunk(path common.Path, addrs []common.ServerAddr) (
 	})
 
 	servers := utils.Map(success, func(v string) common.ServerAddr { return common.ServerAddr(v) })
-	errStr := strings.Join(errs, ";")
+	err := errors.Join(errs...)
 
 	// if err occurred during the creation of chunk, then
 	// we register chunk for re-migration
-	if len(errs) != 0 {
-		log.Err(errors.New(errStr)).Stack()
+	if err != nil {
+		log.Err(err).Stack().Send()
 		csm.replicaMigration = append(csm.replicaMigration, currentHandle)
-		return currentHandle, servers, fmt.Errorf(errStr)
+		return currentHandle, servers, err
 	}
 	return currentHandle, servers, nil
 }
@@ -490,14 +486,15 @@ func (csm *CSManager) HeartBeat(addr common.ServerAddr, info common.MachineInfo,
 		}
 		csm.serverMutex.Unlock()
 		return true
-	} else {
-		srv.Lock()
-		reply.Garbage = srv.garbages
-		srv.garbages = make([]common.ChunkHandle, 0)
-		srv.lastHeatBeat = time.Now()
-		srv.Unlock()
 	}
-
+	srv.Lock()
+	if reply.Garbage == nil {
+		reply.Garbage = make([]common.ChunkHandle, 0)
+	}
+	copy(reply.Garbage, srv.garbages)
+	srv.garbages = make([]common.ChunkHandle, 0)
+	srv.lastHeatBeat = time.Now()
+	srv.Unlock()
 	return false
 }
 
@@ -532,7 +529,7 @@ func (csm *CSManager) getChunkHandle(filePath common.Path, idx common.ChunkIndex
 
 	fileInfo, ok := csm.files[filePath]
 	if !ok {
-		return -1, fmt.Errorf("cannot get handle for path => %v-%v", filePath, idx)
+		return -1, fmt.Errorf(" => %v-%v", filePath, idx)
 	}
 
 	if idx < 0 || int(idx) >= len(fileInfo.handles) {
