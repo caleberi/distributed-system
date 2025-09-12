@@ -23,10 +23,13 @@ const (
 	ArchivalDaySpan                    = 5
 	ArchiveChunkInterval time.Duration = ArchivalDaySpan * 24 * time.Hour
 
+	// failure dectection
+	FailureDetectorKeyExipiryTime time.Duration = 5 * time.Minute
+
 	// chunk server
-	HeartBeatInterval         time.Duration = 30 * time.Second
-	GarbageCollectionInterval time.Duration = 30 * time.Minute
-	PersistMetaDataInterval   time.Duration = 10 * time.Hour
+	HeartBeatInterval         time.Duration = 5 * time.Second
+	GarbageCollectionInterval time.Duration = 5 * time.Minute
+	PersistMetaDataInterval   time.Duration = 10 * time.Minute
 
 	// chunk file information
 	ChunkMetaDataFileName = "chunk.server.meta"
@@ -40,8 +43,8 @@ const (
 	DownloadBufferTick       = 15 * time.Second
 
 	// master server
-	ServerHealthCheckInterval time.Duration = 60 * time.Second
-	MasterPersistMetaInterval time.Duration = 1 * time.Hour
+	ServerHealthCheckInterval time.Duration = 10 * time.Second
+	MasterPersistMetaInterval time.Duration = 15 * time.Hour
 	ServerHealthCheckTimeout  time.Duration = 60 * time.Second
 	MasterMetaDataFileName                  = "master.server.meta"
 
