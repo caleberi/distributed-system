@@ -98,14 +98,14 @@ func NewMasterServer(ctx context.Context, serverAddress common.ServerAddr, root 
 	ma.listener = l
 	err = ma.rootDir.MkDir(".")
 	if err != nil {
-		log.Err(err).Stack()
+		log.Err(err).Stack().Send()
 		log.Fatal().Msg(fmt.Sprintf("cannot create root directory (%s)\n", root))
 		return nil
 	}
 	// load metadata that will be replicated to another backup server <to avoid SOF>
 	err = ma.loadMetadata()
 	if err != nil {
-		log.Err(err).Stack()
+		log.Err(err).Stack().Send()
 		log.Fatal().Msg(fmt.Sprintf("cannot load metadata due to error (%s)\n", err))
 		return nil
 	}
@@ -151,6 +151,10 @@ func NewMasterServer(ctx context.Context, serverAddress common.ServerAddr, root 
 	go func() {
 		persistMetadataCheck := time.NewTicker(common.MasterPersistMetaInterval)
 		serverHealthCheck := time.NewTicker(common.ServerHealthCheckInterval)
+
+		defer persistMetadataCheck.Stop()
+		defer serverHealthCheck.Stop()
+
 		for {
 			var branchInfo common.BranchInfo
 			select {
@@ -162,7 +166,6 @@ func NewMasterServer(ctx context.Context, serverAddress common.ServerAddr, root 
 			case <-persistMetadataCheck.C:
 				branchInfo.Event = string(common.PersistMetaData)
 				branchInfo.Err = ma.persistMetaData()
-			default:
 			}
 
 			if err != nil {
@@ -178,37 +181,33 @@ func NewMasterServer(ctx context.Context, serverAddress common.ServerAddr, root 
 func (ma *MasterServer) serverHeartBeat() error {
 	deadServers := ma.chunkServerManager.detectDeadServer()
 	for _, addr := range deadServers {
-		log.Info().Msg(fmt.Sprintf(">> Removing Server %v from Master's servers list", addr))
-		handles, err := ma.chunkServerManager.removeServer(addr)
-		if err != nil {
-			return err
-		}
-		err = ma.chunkServerManager.removeChunks(handles, addr)
-		if err != nil {
+		log.Info().Msgf(">> Removing Server %v from Master's servers list", addr)
+		handles, err1 := ma.chunkServerManager.removeServer(addr)
+		err2 := ma.chunkServerManager.removeChunks(handles, addr)
+		if err := errors.Join(err1, err2); err != nil {
 			return err
 		}
 	}
 
 	//  deadserver have nothing to do with the replication logic
 	handles := ma.chunkServerManager.getReplicationMigrationList()
-	log.Info().Msg(fmt.Sprintf("MasterServer : Replication needed for handles - %v", handles))
-	for i := 0; i < len(handles); i++ {
-		ck, ok := ma.chunkServerManager.getChunk(handles[i])
+	utils.ForEach(handles, func(handle common.ChunkHandle) {
+		ck, ok := ma.chunkServerManager.getChunk(handle)
 		if !ok {
-			continue
+			return
 		}
 		if ck.expire.Before(time.Now()) {
 			ck.Lock() // don't grant lease during copy
-			log.Info().Msg(fmt.Sprintf("Replication in progress >>> for handle [%v] chunk [%v]", handles[i], ck))
-			err := ma.performReplication(handles[i])
+			log.Info().Msg(fmt.Sprintf("Replication in progress >>> for handle [%v] chunk [%v]", handle, ck))
+			err := ma.performReplication(handle)
 			if err != nil {
 				log.Err(err).Stack().Msg(err.Error())
 				ck.Unlock()
-				continue
+				return
 			}
 			ck.Unlock()
 		}
-	}
+	})
 
 	return nil
 }
@@ -236,7 +235,7 @@ func (ma *MasterServer) performReplication(handle common.ChunkHandle) error {
 		return err
 	}
 
-	err = ma.chunkServerManager.registerReplicas(handle, to, true)
+	err = ma.chunkServerManager.registerReplicas(handle, to, false)
 	if err != nil {
 		return err
 	}
@@ -365,73 +364,76 @@ func (ma *MasterServer) RPCHeartBeatHandler(args rpc_struct.HeartBeatArg, reply 
 		reply.LeaseExtensions = newLeases
 	}
 
-	if firstHeartBeat {
-		systemReportArg := rpc_struct.SysReportInfoArg{}
-		systemReportReply := rpc_struct.SysReportInfoReply{}
-		err := shared.UnicastToRPCServer(string(args.Address), "ChunkServer.RPCSysReportHandler", systemReportArg, &systemReportReply)
-		if err != nil {
-			log.Err(err).Stack().Msg(err.Error())
-			return err
-		}
-		log.Info().Msg(fmt.Sprintf("Got %#v from ChunkServer = %s", systemReportReply, args.Address))
-
-		if len(systemReportReply.Chunks) == 0 {
-			return nil
-		}
-
-		for _, chunkInfo := range systemReportReply.Chunks {
-			chk, ok := ma.chunkServerManager.getChunk(chunkInfo.Handle)
-			if !ok {
-				log.Info().Msg(fmt.Sprintf("=> handle : %v not found on master server ", chunkInfo.Handle))
-				log.Info().Msg(fmt.Sprintf("=> requesting chunkserver %v to  record as garbage", args.Address))
-				reply.Garbage = append(reply.Garbage, chunkInfo.Handle)
-				continue
-			} else {
-				if chk.version != chunkInfo.Version {
-					log.Info().Msg(fmt.Sprintf("* handle : %v version on master server is different ", chunkInfo.Handle))
-					log.Info().Msg(fmt.Sprintf("* verifying possible stale chunk %v on chunkserver %v", chunkInfo.Handle, args.Address))
-
-					var (
-						chunkVersionArg   rpc_struct.CheckChunkVersionArg
-						chunkVersionReply rpc_struct.CheckChunkVersionReply
-					)
-					chunkVersionArg.Handle = chunkInfo.Handle
-					chunkVersionArg.Version = chunkInfo.Version
-
-					if chk.primary != "" {
-						err := shared.UnicastToRPCServer(
-							string(chk.primary),
-							"ChunkServer.RPCCheckChunkVersionHandler",
-							chunkVersionArg, &chunkVersionReply)
-						if err != nil {
-							log.Err(err).Stack().Msg(err.Error())
-							return err
-						}
-						if chunkVersionReply.Stale {
-							log.Info().Msg(fmt.Sprintf("=> requesting chunkserver %v to record as garbage since chunk is stale", args.Address))
-							reply.Garbage = append(reply.Garbage, chunkInfo.Handle)
-							continue
-						}
-					} else {
-						log.Info().Msg("Missing chunk primary server so version verification failed")
-						if len(chk.locations) != 0 {
-							reply.Garbage = append(reply.Garbage, chunkInfo.Handle)
-							continue
-						}
-					}
-				}
-				if err := ma.chunkServerManager.registerReplicas(chunkInfo.Handle, args.Address, false); err != nil {
-					log.Err(err).Stack().Msg(err.Error())
-				}
-				ma.chunkServerManager.addChunk([]common.ServerAddr{args.Address}, chunkInfo.Handle)
-				log.Info().Msgf("replication after first ping %v", ma.chunkServerManager.getReplicationMigrationList())
-			}
-		}
-	} else {
-		log.Info().Msgf("Got <HEART_BEAT> from ChunkServer = %s", args.Address)
-		log.Info().Msgf("Garbage chunks [%v]", ma.chunkServerManager.getGarbages())
+	if !firstHeartBeat {
+		// log.Info().Msgf("Got <HEART_BEAT> from ChunkServer = %s", args.Address)
+		utils.ForEach(
+			reply.Garbage,
+			func(handle common.ChunkHandle) {
+				log.Info().Msgf(">> Forwarding Handle[%v] For Removal", handle)
+			})
+		return nil
 	}
 
+	systemReportArg := rpc_struct.SysReportInfoArg{}
+	systemReportReply := rpc_struct.SysReportInfoReply{}
+	err := shared.UnicastToRPCServer(
+		string(args.Address), rpc_struct.CRPCSysReportHandler,
+		systemReportArg, &systemReportReply)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return err
+	}
+
+	if len(systemReportReply.Chunks) == 0 {
+		return nil
+	}
+
+	utils.ForEach(systemReportReply.Chunks, func(chunkInfo common.PersistedChunkInfo) {
+		chk, ok := ma.chunkServerManager.getChunk(chunkInfo.Handle)
+		if !ok {
+			log.Info().Msg(fmt.Sprintf("=> handle : %v not found on master server ", chunkInfo.Handle))
+			log.Info().Msg(fmt.Sprintf("=> requesting chunkserver %v to  record as garbage", args.Address))
+			reply.Garbage = append(reply.Garbage, chunkInfo.Handle)
+			return
+		}
+		if chk.version != chunkInfo.Version {
+			log.Info().Msg(fmt.Sprintf("* handle : %v version on master server is different ", chunkInfo.Handle))
+			log.Info().Msg(fmt.Sprintf("* verifying possible stale chunk %v on chunkserver %v", chunkInfo.Handle, args.Address))
+
+			var (
+				chunkVersionArg   rpc_struct.CheckChunkVersionArg
+				chunkVersionReply rpc_struct.CheckChunkVersionReply
+			)
+			chunkVersionArg.Handle = chunkInfo.Handle
+			chunkVersionArg.Version = chunkInfo.Version
+
+			if chk.primary != "" {
+				err := shared.UnicastToRPCServer(
+					string(chk.primary),
+					rpc_struct.CRPCCheckChunkVersionHandler,
+					chunkVersionArg, &chunkVersionReply)
+				if err != nil {
+					log.Err(err).Stack().Msg(err.Error())
+					return
+				}
+				if chunkVersionReply.Stale {
+					log.Info().Msg(fmt.Sprintf("=> requesting chunkserver %v to record as garbage since chunk is stale", args.Address))
+					reply.Garbage = append(reply.Garbage, chunkInfo.Handle)
+					return
+				}
+				return
+			}
+			log.Info().Msg("Missing chunk primary server so version verification failed")
+			if len(chk.locations) != 0 {
+				reply.Garbage = append(reply.Garbage, chunkInfo.Handle)
+				return
+			}
+		}
+		if err := ma.chunkServerManager.registerReplicas(chunkInfo.Handle, args.Address, false); err != nil {
+			log.Err(err).Stack().Msg(err.Error())
+		}
+		ma.chunkServerManager.addChunk([]common.ServerAddr{args.Address}, chunkInfo.Handle)
+	})
 	return nil
 }
 
@@ -445,7 +447,9 @@ func (ma *MasterServer) RPCGetPrimaryAndSecondaryServersInfoHandler(
 		return err
 	}
 
-	utils.ForEach(staleServers, func(v common.ServerAddr) { ma.chunkServerManager.addGarbage(v, args.Handle) })
+	utils.ForEach(staleServers, func(v common.ServerAddr) {
+		ma.chunkServerManager.addGarbage(v, args.Handle)
+	})
 	reply.Expire = lease.Expire
 	reply.SecondaryServers = lease.Secondaries
 	reply.Primary = lease.Primary
@@ -466,24 +470,17 @@ func (ma *MasterServer) RPCGetChunkHandleHandler(
 		return err
 	}
 
-	var file *namespacemanager.NsTree
-
 	// Try to create the path if it created before it err
 	// We then try to get it instead
 	err = ma.namespaceManager.Create(args.Path)
 	if err != nil {
 		log.Err(err).Stack().Msg(err.Error())
-		file, err = ma.namespaceManager.Get(args.Path)
-		if err != nil {
-			log.Err(err).Stack().Msg(err.Error())
-			return err
-		}
-	} else {
-		file, err = ma.namespaceManager.Get(args.Path)
-		if err != nil {
-			log.Err(err).Stack().Msg(err.Error())
-			return err
-		}
+		return err
+	}
+	file, err := ma.namespaceManager.Get(args.Path)
+	if err != nil {
+		log.Err(err).Stack().Msg(err.Error())
+		return err
 	}
 
 	file.Lock()
