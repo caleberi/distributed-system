@@ -1,13 +1,10 @@
 package main
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/caleberi/distributed-system/client"
 	"github.com/caleberi/distributed-system/common"
-	"github.com/caleberi/distributed-system/utils"
-	"github.com/rs/zerolog/log"
 )
 
 var data string = `### Captain America: The Winter Soldier - A Modern Marvel Masterpiece
@@ -122,14 +119,14 @@ func main() {
 	// 	return
 	// }
 
-	pathInfos, err := client.List("/")
-	if err != nil {
-		log.Err(err).Stack().Msg(err.Error())
-		return
-	}
-	utils.ForEach(pathInfos, func(v common.PathInfo) {
-		fmt.Println(">> " + v.Path)
-	})
+	// pathInfos, err := client.List("/")
+	// if err != nil {
+	// 	log.Err(err).Stack().Msg(err.Error())
+	// 	return
+	// }
+	// utils.ForEach(pathInfos, func(v common.PathInfo) {
+	// 	fmt.Println(">> " + v.Path)
+	// })
 
 	// err = client.CreateFile("/test-files/js/app.js")
 	// if err != nil {
