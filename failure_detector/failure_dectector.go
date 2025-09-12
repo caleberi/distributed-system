@@ -120,7 +120,6 @@ func (s SuspicionLevel) Interpret(phi float64) (ActionMessage, error) {
 	if math.IsNaN(phi) {
 		return "", errors.New("phi is not a number")
 	}
-	log.Printf("phi: %v", phi)
 	switch {
 	case phi >= s.AccruementThreshold:
 		return AccumentThresholdAlert, nil
