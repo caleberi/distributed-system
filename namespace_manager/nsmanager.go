@@ -248,7 +248,7 @@ func (nm *NamespaceManager) Create(p common.Path) error {
 	}
 
 	if _, ok := cwd.childrenNodes[filename]; ok {
-		return fmt.Errorf("path %s exist before", p)
+		return nil
 	}
 
 	cwd.childrenNodes[filename] = &NsTree{Path: p}
