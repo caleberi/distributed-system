@@ -3,6 +3,7 @@ package chunkserver
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -57,10 +58,10 @@ type chunkInfo struct {
 	mutations map[common.ChunkVersion]common.Mutation // all necessary mutations to be committed for this chunk to FS
 }
 
-// Server represents a server instance in a distributed file system, managing
+// ChunkServer represents a server instance in a distributed file system, managing
 // chunk metadata, leases, and system resources. It handles network communication,
 // failure detection, and garbage collection for chunks.
-type Server struct {
+type ChunkServer struct {
 	mu, lmu  sync.RWMutex // mutex for synchronizing access to server state
 	listener net.Listener // network listener for incoming connections
 
@@ -122,7 +123,7 @@ type PersistedMetaData struct {
 // Returns:
 //   - *Server: A pointer to the initialized ChunkServer instance.
 //   - error: An error if any step in the initialization process fails, otherwise nil.
-func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, root string) (*Server, error) {
+func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, root string) (*ChunkServer, error) {
 	log.Info().Msg(fmt.Sprintf("Starting ChunkServer = %s to communicate with @%v", serverAddr, masterAddr))
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -139,12 +140,12 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 	}
 
 	failureDetector, err := failuredetector.NewFailureDetector(
-		string(masterAddr), 2,
+		string(masterAddr), 1000,
 		&redis.Options{Addr: "localhost:6379"},
-		5*time.Minute,
+		common.FailureDetectorKeyExipiryTime,
 		failuredetector.SuspicionLevel{
-			AccruementThreshold: 70,
-			UpperBoundThreshold: 30,
+			AccruementThreshold: 7,
+			UpperBoundThreshold: 3,
 		})
 	if err != nil {
 		return nil, err
@@ -158,7 +159,7 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 		return nil, err
 	}
 
-	cs := &Server{
+	cs := &ChunkServer{
 		ServerAddr:         serverAddr,
 		MasterAddr:         masterAddr,
 		MachineInfo:        machineInfo,
@@ -224,8 +225,15 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 		garbageCollectionTicker := time.NewTicker(common.GarbageCollectionInterval)
 		persistMetaDataTicker := time.NewTicker(common.PersistMetaDataInterval)
 		archiveChunkTicker := time.NewTicker(common.ArchiveChunkInterval)
-		quickStart := make(chan struct{}, 1)
-		quickStart <- struct{}{}
+
+		defer heartBeatTicker.Stop()
+		defer garbageCollectionTicker.Stop()
+		defer persistMetaDataTicker.Stop()
+		defer archiveChunkTicker.Stop()
+
+		var branchInfo common.BranchInfo
+		branchInfo.Event = string(common.HeartBeat)
+		branchInfo.Err = cs.heartBeat()
 
 		// the paper mentioned the chunk server sending heartbeat at every
 		// scheduled interval and obviously it seems the only to send
@@ -234,12 +242,8 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 		// 1. the chunk-server should inform the master of their status [X]
 		// 2. the master polls for the status of the chunk server []
 		//
-		var branchInfo common.BranchInfo
 		for {
 			select {
-			case <-quickStart:
-				branchInfo.Event = string(common.HeartBeat)
-				branchInfo.Err = cs.heartBeat()
 			case <-cs.shutdownChan:
 				log.Info().Msg(fmt.Sprintf("Gracefully shutting down server (%s)...\n", serverAddr))
 				time.Sleep(time.Second * 1)
@@ -255,23 +259,16 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 			case <-garbageCollectionTicker.C:
 				branchInfo.Event = string(common.GarbageCollection)
 				branchInfo.Err = cs.garbageCollection()
-				return
 			case <-archiveChunkTicker.C:
 				branchInfo.Event = string(common.Archival)
 				branchInfo.Err = cs.archiveChunks()
-			default:
 			}
 
 			if branchInfo.Err != nil {
 				log.Err(branchInfo.Err).Msgf(
 					fmt.Sprintf("Server %s  background-(%s) event triggered an error (%s)\n",
 						cs.ServerAddr, branchInfo.Event, branchInfo.Err))
-				return
 			}
-
-			log.Info().Msg(fmt.Sprintf(
-				"Server %s background-(%s) event trigged\n",
-				cs.ServerAddr, branchInfo.Event))
 		}
 	}()
 
@@ -285,7 +282,7 @@ func NewChunkServer(serverAddr common.ServerAddr, masterAddr common.ServerAddr, 
 // The function is thread-safe and ensures proper resource cleanup.
 //
 // Returns nil if all chunks are processed successfully, or a combined error if any failures occur.
-func (cs *Server) archiveChunks() error {
+func (cs *ChunkServer) archiveChunks() error {
 	chunksToArchive := map[common.ChunkHandle]*chunkInfo{}
 	checkAccessTime := func(value *chunkInfo) bool {
 		return time.Until(value.accessTime).Hours()/24 > common.ArchivalDaySpan
@@ -357,7 +354,7 @@ func (cs *Server) archiveChunks() error {
 // Returns:
 //   - nil if the chunk is successfully decompressed or was not compressed.
 //   - An error if the chunk does not exist, decompression fails, or an issue occurs in the process.
-func (cs *Server) unarchiveChunks(handle common.ChunkHandle) error {
+func (cs *ChunkServer) unarchiveChunks(handle common.ChunkHandle) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -389,7 +386,7 @@ func (cs *Server) unarchiveChunks(handle common.ChunkHandle) error {
 // Returns:
 //   - nil if the metadata is successfully loaded or the file is empty (io.EOF).
 //   - An error if the file cannot be opened, created, or decoded, or if any other issue occurs.
-func (cs *Server) loadMetadata() error {
+func (cs *ChunkServer) loadMetadata() error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -456,7 +453,7 @@ func (cs *Server) loadMetadata() error {
 // Returns:
 //   - nil if the heartbeat is successfully sent, processed, and failure prediction is recorded.
 //   - An error if the RPC call fails, network data recording fails, or failure prediction fails.
-func (cs *Server) heartBeat() error {
+func (cs *ChunkServer) heartBeat() error {
 	arg := rpc_struct.HeartBeatArg{
 		Address:     cs.ServerAddr,
 		MachineInfo: cs.MachineInfo,
@@ -481,7 +478,6 @@ func (cs *Server) heartBeat() error {
 	}
 
 	reply.NetworkData.BackwardTrip.ReceivedAt = time.Now()
-
 	if err := cs.failureDetector.RecordSample(reply.NetworkData); err != nil {
 		log.Err(err).Stack().Msg("err storing network data for prediction")
 		return err
@@ -506,12 +502,13 @@ func (cs *Server) heartBeat() error {
 		}
 	}()
 
+	wg.Wait()
 	prediction, err := cs.failureDetector.PredictFailure()
 	if err != nil {
-		return err
+		log.Err(err).Stack().Send()
+	} else {
+		log.Info().Msgf("server=%s prediction=%.2f  message=%s", cs.ServerAddr, prediction.Phi, prediction.Message)
 	}
-	log.Info().Msgf("server=%s prediction=%.2f  message=%s", cs.ServerAddr, prediction.Phi, prediction.Message)
-	wg.Wait()
 	return nil
 }
 
@@ -523,7 +520,7 @@ func (cs *Server) heartBeat() error {
 // Returns:
 //   - nil if the metadata is successfully written to the file.
 //   - An error if the file cannot be opened, written, or encoded, or if any other issue occurs.
-func (cs *Server) persistMetadata() error {
+func (cs *ChunkServer) persistMetadata() error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
@@ -578,7 +575,7 @@ func (cs *Server) persistMetadata() error {
 //   - nil, as errors during deletion are logged but not returned to allow complete
 //     processing of the garbage list.
 //   - Note: Individual deletion errors are logged for debugging.
-func (cs *Server) garbageCollection() error {
+func (cs *ChunkServer) garbageCollection() error {
 	log.Info().Msg("::: Doing some garbage collection >>> ")
 	for cs.garbage.Length() > 0 {
 		handle := cs.garbage.PopFront()
@@ -605,7 +602,7 @@ func (cs *Server) garbageCollection() error {
 // Returns:
 //   - nil if the chunk is successfully deleted or does not exist.
 //   - An error if the chunk's file cannot be removed from the filesystem.
-func (cs *Server) deleteChunk(handle common.ChunkHandle) error {
+func (cs *ChunkServer) deleteChunk(handle common.ChunkHandle) error {
 	cs.mu.Lock()
 	chunkInfo, exists := cs.chunks[handle]
 	if !exists {
@@ -646,7 +643,7 @@ func (cs *Server) deleteChunk(handle common.ChunkHandle) error {
 // Returns:
 //   - nil if the shutdown sequence completes successfully.
 //   - An error if critical steps (e.g., metadata persistence, listener closure) fail.
-func (cs *Server) Shutdown() error {
+func (cs *ChunkServer) Shutdown() error {
 	cs.mu.Lock()
 	if cs.isDead {
 		cs.mu.Unlock()
@@ -706,7 +703,7 @@ func (cs *Server) Shutdown() error {
 // Returns:
 //   - nil if the system report is successfully generated and populated in the reply.
 //   - An error is not returned in the current implementation, but future versions could include error handling for critical failures.
-func (cs *Server) RPCSysReportHandler(args rpc_struct.SysReportInfoArg, reply *rpc_struct.SysReportInfoReply) error {
+func (cs *ChunkServer) RPCSysReportHandler(args rpc_struct.SysReportInfoArg, reply *rpc_struct.SysReportInfoReply) error {
 	log.Info().Msgf("Server %s: gathering system statistics", cs.ServerAddr)
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
@@ -728,8 +725,8 @@ func (cs *Server) RPCSysReportHandler(args rpc_struct.SysReportInfoArg, reply *r
 		return err
 	}
 
-	var buf bytes.Buffer
-	table := tablewriter.NewWriter(&buf)
+	log.Info().Msgf("Server %s: memory statistics\n", cs.ServerAddr)
+	table := tablewriter.NewWriter(log.Logger)
 	table.Header([]string{"Metric", "Value (MiB)"})
 	table.Append([]string{"Alloc", fmt.Sprintf("%v", alloc)})
 	table.Append([]string{"TotalAlloc", fmt.Sprintf("%v", totalAlloc)})
@@ -739,7 +736,6 @@ func (cs *Server) RPCSysReportHandler(args rpc_struct.SysReportInfoArg, reply *r
 	if err != nil {
 		return err
 	}
-	log.Info().Msgf("Server %s: memory statistics\n%s", cs.ServerAddr, buf.String())
 
 	mem := common.Memory{
 		TotalAlloc: totalAlloc,
@@ -793,7 +789,8 @@ func (cs *Server) RPCSysReportHandler(args rpc_struct.SysReportInfoArg, reply *r
 // Returns:
 //   - nil if the chunk version is successfully checked or the chunk does not exist.
 //   - Note: Errors are not currently returned, but invalid chunk data could warrant an error in future versions.
-func (cs *Server) RPCCheckChunkVersionHandler(args rpc_struct.CheckChunkVersionArg, reply *rpc_struct.CheckChunkVersionReply) error {
+func (cs *ChunkServer) RPCCheckChunkVersionHandler(
+	args rpc_struct.CheckChunkVersionArg, reply *rpc_struct.CheckChunkVersionReply) error {
 	cs.mu.Lock()
 	chinfo, ok := cs.chunks[args.Handle]
 	cs.mu.Unlock()
@@ -828,7 +825,19 @@ func (cs *Server) RPCCheckChunkVersionHandler(args rpc_struct.CheckChunkVersionA
 	return nil
 }
 
-func (cs *Server) RPCReadChunkHandler(args rpc_struct.ReadChunkArgs, reply *rpc_struct.ReadChunkReply) error {
+// RPCReadChunkHandler handles an RPC request to read data from a specific chunk.
+// It retrieves the chunk information, reads the requested data from the chunk at the specified offset,
+// and updates the chunk's last access time. If the chunk is not found or is abandoned, it returns an error.
+// If the read operation reaches the end of the chunk, it sets the reply's ErrorCode to indicate EOF.
+//
+// Args:
+//   - args: ReadChunkArgs containing the chunk handle, offset, and length to read.
+//   - reply: ReadChunkReply to store the read data, length, and any error code.
+//
+// Returns:
+//   - error: Returns an error if the chunk is not found, abandoned, or if the read operation fails.
+//     Returns nil if the read is successful or if an EOF is encountered (with reply.ErrorCode set).
+func (cs *ChunkServer) RPCReadChunkHandler(args rpc_struct.ReadChunkArgs, reply *rpc_struct.ReadChunkReply) error {
 	cs.mu.RLock()
 	chInfo, ok := cs.chunks[args.Handle]
 	cs.mu.RUnlock()
@@ -858,7 +867,19 @@ func (cs *Server) RPCReadChunkHandler(args rpc_struct.ReadChunkArgs, reply *rpc_
 	return err
 }
 
-func (cs *Server) RPCCreateChunkHandler(args rpc_struct.CreateChunkArgs, reply *rpc_struct.CreateChunkReply) error {
+// RPCCreateChunkHandler handles an RPC request to create a new chunk on the ChunkServer.
+// It checks if the chunk already exists; if it does, the request is ignored. Otherwise, it initializes
+// a new chunkInfo structure for the specified chunk handle, creates the corresponding file in the
+// server's root directory, and stores the chunk metadata in the server's chunk map.
+//
+// Args:
+//   - args: CreateChunkArgs containing the chunk handle for the new chunk.
+//   - reply: CreateChunkReply to store the result of the operation (currently unused).
+//
+// Returns:
+//   - error: Returns nil if the chunk is created successfully or if it already exists.
+//     Returns an error if the file creation fails.
+func (cs *ChunkServer) RPCCreateChunkHandler(args rpc_struct.CreateChunkArgs, reply *rpc_struct.CreateChunkReply) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	log.Info().Msg(fmt.Sprintf("Server (%v) - create chunk %v", cs.ServerAddr, args.Handle))
@@ -885,14 +906,27 @@ func (cs *Server) RPCCreateChunkHandler(args rpc_struct.CreateChunkArgs, reply *
 	return cs.rootDir.CreateFile(filename)
 }
 
-func (cs *Server) RPCForwardDataHandler(args rpc_struct.ForwardDataArgs, reply *rpc_struct.ForwardDataReply) error {
+// RPCForwardDataHandler handles an RPC request to forward data to the ChunkServer's download buffer
+// and propagate it to replica servers. It checks if the data already exists in the download buffer
+// using the provided DownloadBufferId. If it exists, the request is ignored. Otherwise, the data is
+// stored in the buffer, and if replicas are specified, the data is forwarded to the next replica
+// server in the list via an RPC call.
+//
+// Args:
+//   - args: ForwardDataArgs containing the DownloadBufferId, data to store, and a list of replica addresses.
+//   - reply: ForwardDataReply to store the result of the operation (currently unused).
+//
+// Returns:
+//   - error: Returns nil if the data is stored successfully or already exists in the buffer.
+//     Returns an error if forwarding to a replica server fails
+func (cs *ChunkServer) RPCForwardDataHandler(args rpc_struct.ForwardDataArgs, reply *rpc_struct.ForwardDataReply) error {
 	// check if we have the item previously
 	_, ok := cs.downloadBuffer.Get(args.DownloadBufferId)
 	if ok {
 		return nil
 	}
 
-	log.Printf("storing %v on %v's buffer cache", args.DownloadBufferId, cs.ServerAddr)
+	log.Info().Msgf("storing %v on %v's buffer cache", args.DownloadBufferId, cs.ServerAddr)
 	cs.downloadBuffer.Set(args.DownloadBufferId, args.Data)
 	if len(args.Replicas) == 0 {
 		return nil
@@ -900,14 +934,21 @@ func (cs *Server) RPCForwardDataHandler(args rpc_struct.ForwardDataArgs, reply *
 
 	replicaAddr := args.Replicas[0]
 	args.Replicas = args.Replicas[1:]
-	err := shared.UnicastToRPCServer(string(replicaAddr), "ChunkServer.RPCForwardDataHandler", args, &reply)
-	if err != nil {
-		return err
-	}
-	return nil
+	return shared.UnicastToRPCServer(string(replicaAddr), rpc_struct.CRPCForwardDataHandler, args, &reply)
 }
 
-func (cs *Server) RPCGrantLeaseHandler(args rpc_struct.GrantLeaseInfoArgs, reply *rpc_struct.GrantLeaseInfoReply) error {
+// RPCGrantLeaseHandler handles an RPC request to grant a lease for a chunk on the ChunkServer.
+// It creates a new lease with the provided expiration time, primary server, secondary servers,
+// and marks it as in use. The lease is then added to the server's lease list. The operation
+// is protected by a mutex to ensure thread safety.
+//
+// Args:
+//   - args: GrantLeaseInfoArgs containing the lease expiration time, primary server, and secondary servers.
+//   - reply: GrantLeaseInfoReply to store the result of the operation (currently unused).
+//
+// Returns:
+//   - error: Returns nil to indicate the lease was successfully granted.
+func (cs *ChunkServer) RPCGrantLeaseHandler(args rpc_struct.GrantLeaseInfoArgs, reply *rpc_struct.GrantLeaseInfoReply) error {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	cs.leases.PushBack(&common.Lease{
@@ -919,7 +960,21 @@ func (cs *Server) RPCGrantLeaseHandler(args rpc_struct.GrantLeaseInfoArgs, reply
 	return nil
 }
 
-func (cs *Server) RPCWriteChunkHandler(args rpc_struct.WriteChunkArgs, reply *rpc_struct.WriteChunkReply) error {
+// RPCWriteChunkHandler handles an RPC request to write data to a chunk on the ChunkServer.
+// It retrieves data from the download buffer using the provided DownloadBufferId, validates
+// the data size against the maximum allowed chunk size, checks for a valid lease, and then
+// performs the write operation. If the data is not found, the size exceeds the limit, or the
+// lease is invalid/expired, an error is returned.
+//
+// Args:
+//   - args: WriteChunkArgs containing the DownloadBufferId, offset, and replica addresses.
+//   - reply: WriteChunkReply to store the result of the operation, including any error code.
+//
+// Returns:
+//   - error: Returns an error if the data is not found in the buffer, the data size exceeds
+//     the maximum chunk size, the lease is invalid or expired, or the write operation fails.
+//     Returns nil if the write is successful.
+func (cs *ChunkServer) RPCWriteChunkHandler(args rpc_struct.WriteChunkArgs, reply *rpc_struct.WriteChunkReply) error {
 	data, ok := cs.downloadBuffer.Get(args.DownloadBufferId)
 	if !ok {
 		reply.ErrorCode = common.DownloadBufferMiss
@@ -940,109 +995,37 @@ func (cs *Server) RPCWriteChunkHandler(args rpc_struct.WriteChunkArgs, reply *rp
 	}
 
 	log.Info().Msgf("args.Replicas => %#v", args.Replicas)
-
 	lease := cs.leases.PopFront()
 	if lease == nil || lease.IsExpired(time.Now()) {
-		return fmt.Errorf("could not acquire Write lease / lease has expired")
+		return fmt.Errorf("could not acquire write lease / lease has expired")
 	}
 
-	if err := doWriteOperation(args, cs, data); err != nil {
+	err = performWrite(cs, args, data)
+	if err != nil {
 		return err
 	}
-	cs.leases.PopFront()
+
+	if !lease.IsExpired(time.Now()) {
+		cs.leases.PushFront(lease)
+	}
 	return nil
 }
 
-func doWriteOperation(args rpc_struct.WriteChunkArgs, cs *Server, data []byte) error {
-	log.Info().Msgf("[writing to chunk] %v", cs.ServerAddr)
-	errCh := make(chan error)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func(wg *sync.WaitGroup, errCh chan error) {
-		defer wg.Done()
-		handle := args.DownloadBufferId.Handle
-		cs.mu.RLock()
-		chInfo, ok := cs.chunks[handle]
-		cs.mu.RUnlock()
-		log.Info().Msgf("writing to chunk %v : %#v", handle, chInfo)
-		if ok && chInfo.isCompressed {
-			err := cs.unarchiveChunks(handle)
-			if err != nil {
-				errCh <- err
-				return
-			}
-		} else {
-			log.Info().Msgf("chunk [%v] not compressed ", handle)
-		}
-
-		if chInfo.completed {
-			log.Err(fmt.Errorf("chunk-%v cannot be written to as it is currently complete", handle)).Send()
-			errCh <- fmt.Errorf("chunk-%v cannot be written to as it is currently complete", handle)
-			return
-		}
-
-		if !ok || chInfo.abandoned {
-			log.Err(fmt.Errorf("%v is either abandoned or lives in another dimension", handle)).Send()
-			errCh <- fmt.Errorf("%v is either abandoned or lives in another dimension", handle)
-			return
-		}
-
-		mutation := &common.Mutation{
-			MutationType: common.MutationWrite,
-			Data:         data,
-			Offset:       args.Offset,
-		}
-
-		go func() {
-			log.Info().Msgf("<<< commencing mutation >>>>")
-			err := cs.mutate(handle, mutation)
-			if err != nil {
-				errCh <- err
-			}
-			chInfo.Lock()
-			chInfo.mutations[chInfo.version] = *mutation
-			chInfo.Unlock()
-			log.Info().Msgf("<<< done with mutation >>>>")
-		}()
-
-		var applyMutationReply rpc_struct.ApplyMutationReply
-		utils.ForEach(args.Replicas, func(replicaAddr common.ServerAddr) {
-			log.Info().Msgf("forwarding data to replica (%v)", replicaAddr)
-			err := shared.UnicastToRPCServer(
-				string(replicaAddr),
-				"ChunkServer.RPCApplyMutationHandler",
-				rpc_struct.ApplyMutationArgs{
-					DownloadBufferId: args.DownloadBufferId,
-					MutationType:     common.MutationWrite,
-					Offset:           args.Offset,
-				}, &applyMutationReply)
-			if err != nil {
-				errCh <- err
-			}
-		})
-	}(&wg, errCh)
-
-	go func() {
-		wg.Wait()
-		close(errCh)
-	}()
-
-	var errs []string
-	for e := range errCh {
-		errs = append(errs, e.Error())
-	}
-	if len(errs) != 0 {
-		return errors.New(strings.Join(errs, ";"))
-	}
-
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	cs.chunks[args.DownloadBufferId.Handle].length += common.Offset(len(data))
-	return nil
-}
-
-func (cs *Server) RPCApplyMutationHandler(args rpc_struct.ApplyMutationArgs, reply *rpc_struct.ApplyMutationReply) error {
-
+// RPCApplyMutationHandler handles an RPC request to apply a mutation to a chunk on the ChunkServer.
+// It retrieves data from the download buffer using the provided DownloadBufferId, validates the data
+// size against the maximum allowed chunk size, ensures the chunk exists and is not abandoned, and
+// applies the specified mutation (e.g., append or update) to the chunk. The operation is protected
+// by a mutex to ensure thread safety during mutation.
+//
+// Args:
+//   - args: ApplyMutationArgs containing the DownloadBufferId, offset, and mutation type.
+//   - reply: ApplyMutationReply to store the result of the operation, including any error code.
+//
+// Returns:
+//   - error: Returns an error if the data is not found in the buffer, the data size exceeds the
+//     maximum chunk size, the chunk is not found or abandoned, or the mutation operation fails.
+//     Returns nil if the mutation is applied successfully.
+func (cs *ChunkServer) RPCApplyMutationHandler(args rpc_struct.ApplyMutationArgs, reply *rpc_struct.ApplyMutationReply) error {
 	data, ok := cs.downloadBuffer.Get(args.DownloadBufferId)
 	if !ok {
 		reply.ErrorCode = common.DownloadBufferMiss
@@ -1081,7 +1064,7 @@ func (cs *Server) RPCApplyMutationHandler(args rpc_struct.ApplyMutationArgs, rep
 
 	chInfo.Lock()
 	defer chInfo.Unlock()
-	err = cs.mutate(handle, mutation)
+	err = cs.doMutate(handle, mutation)
 	if err != nil {
 		return err
 	}
@@ -1089,7 +1072,22 @@ func (cs *Server) RPCApplyMutationHandler(args rpc_struct.ApplyMutationArgs, rep
 	return nil
 }
 
-func (cs *Server) RPCAppendChunkHandler(args rpc_struct.AppendChunkArgs, reply *rpc_struct.AppendChunkReply) error {
+// RPCAppendChunkHandler handles an RPC request to append data to a chunk on the ChunkServer.
+// It retrieves data from the download buffer using the provided DownloadBufferId, validates the chunk's
+// existence and state, and checks if the append operation would exceed the maximum chunk size. If the
+// chunk is compressed, it is unarchived. The append operation is performed asynchronously on the local
+// server and forwarded to replica servers. If the data size exceeds the maximum, a padding mutation is
+// applied, and an error code is set. Errors from local or replica operations are collected and returned.
+//
+// Args:
+//   - args: AppendChunkArgs containing the DownloadBufferId and replica addresses.
+//   - reply: AppendChunkReply to store the offset where data is appended and any error code.
+//
+// Returns:
+//   - error: Returns an error if the data is not found in the buffer, the chunk is not found or
+//     abandoned, unarchiving fails, or any local or replica mutation fails. Returns nil if the append
+//     is successful.
+func (cs *ChunkServer) RPCAppendChunkHandler(args rpc_struct.AppendChunkArgs, reply *rpc_struct.AppendChunkReply) error {
 	data, ok := cs.downloadBuffer.Get(args.DownloadBufferId)
 	if !ok {
 		reply.ErrorCode = common.DownloadBufferMiss
@@ -1104,8 +1102,7 @@ func (cs *Server) RPCAppendChunkHandler(args rpc_struct.AppendChunkArgs, reply *
 	cs.mu.RUnlock()
 
 	if chInfo.isCompressed {
-		err := cs.unarchiveChunks(handle)
-		if err != nil {
+		if err := cs.unarchiveChunks(handle); err != nil {
 			return err
 		}
 	}
@@ -1135,26 +1132,28 @@ func (cs *Server) RPCAppendChunkHandler(args rpc_struct.AppendChunkArgs, reply *
 		Data:         data,
 		Offset:       offset,
 	}
-	errs := make(chan error)
-	// update the file on this server (async)
-	go func() {
-		err := cs.mutate(handle, mutation)
-		if err != nil {
-			errs <- err
-		}
-	}()
 
+	err = cs.doMutate(handle, mutation)
+	if err != nil {
+		return err
+	}
+	cs.mu.Lock()
+	chInfo.length = newLength
+	cs.mu.Unlock()
 	applyMutationArgs := rpc_struct.ApplyMutationArgs{
 		DownloadBufferId: args.DownloadBufferId,
 		MutationType:     mutationType,
 		Offset:           offset,
 	}
 
-	// forward a written call to secondary server
+	errs := make(chan error)
+	// forward a written call to all available secondary servers
 	go func() {
 		utils.ForEach(args.Replicas, func(addr common.ServerAddr) {
 			var applyMutationReply rpc_struct.ApplyMutationReply
-			err := shared.UnicastToRPCServer(string(addr), "ChunkServer.RPCApplyMutationHandler", applyMutationArgs, &applyMutationReply)
+			err := shared.UnicastToRPCServer(
+				string(addr), rpc_struct.CRPCApplyMutationHandler,
+				applyMutationArgs, &applyMutationReply)
 			if err != nil {
 				errs <- err
 			}
@@ -1162,58 +1161,71 @@ func (cs *Server) RPCAppendChunkHandler(args rpc_struct.AppendChunkArgs, reply *
 		close(errs)
 	}()
 
-	var errArr []string
-
+	var allObservedErrors []error
 	for e := range errs {
-		errArr = append(errArr, e.Error())
+		allObservedErrors = append(allObservedErrors, e)
 	}
-
-	if len(errArr) != 0 {
-		return errors.New(strings.Join(errArr, ";"))
-	}
-	chInfo.length = newLength
-	return nil
+	return errors.Join(allObservedErrors...)
 }
 
-func (cs *Server) RPCGetSnapshotHandler(args rpc_struct.GetSnapshotArgs, reply *rpc_struct.GetSnapshotReply) error {
+// RPCGetSnapshotHandler handles an RPC request to retrieve a snapshot of a chunk from the ChunkServer.
+// It checks if the chunk exists and is not abandoned, unarchives it if compressed, reads the entire chunk
+// data from the beginning, and forwards the data to the specified replica server for copying. The operation
+// uses a read lock to ensure thread safety when accessing chunk metadata.
+//
+// Args:
+//   - args: GetSnapshotArgs containing the chunk handle and replica server address.
+//   - reply: GetSnapshotReply to store the result of the operation (currently unused).
+//
+// Returns:
+//   - error: Returns an error if the chunk does not exist, is abandoned, unarchiving fails, reading the chunk
+//     fails, or forwarding to the replica server fails. Returns nil if the snapshot is successfully retrieved
+//     and forwarded.
+func (cs *ChunkServer) RPCGetSnapshotHandler(args rpc_struct.GetSnapshotArgs, reply *rpc_struct.GetSnapshotReply) error {
 	handle := args.Handle
 	cs.mu.RLock()
 	chInfo, ok := cs.chunks[handle]
-	cs.mu.RUnlock()
 	if !ok || chInfo.abandoned {
+		cs.mu.RUnlock()
 		return fmt.Errorf("chunk %v does not exist or is abandoned", handle)
 	}
 
-	err := cs.unarchiveChunks(handle)
-	if err != nil {
-		return err
+	if chInfo.isCompressed {
+		if err := cs.unarchiveChunks(handle); err != nil {
+			cs.mu.RUnlock()
+			return err
+		}
 	}
-	chInfo.RLock()
-	defer chInfo.RUnlock()
-
+	cs.mu.RUnlock()
 	data := make([]byte, chInfo.length)
-	_, err = cs.readChunk(handle, 0, data)
-	if err != nil {
+	if _, err := cs.readChunk(handle, 0, data); err != nil {
 		return err
 	}
 
 	var r rpc_struct.ApplyCopyReply
-
 	applyCopyArgs := rpc_struct.ApplyCopyArgs{
 		Handle:  handle,
 		Data:    data,
 		Version: chInfo.version,
 	}
 
-	return shared.UnicastToRPCServer(string(args.Replicas), "ChunkServer.RPCApplyCopyHandler", applyCopyArgs, &r)
+	return shared.UnicastToRPCServer(string(args.Replicas), rpc_struct.CRPCApplyCopyHandler, applyCopyArgs, &r)
 }
 
-func (cs *Server) RPCApplyCopyHandler(args rpc_struct.ApplyCopyArgs, reply *rpc_struct.AppendChunkReply) error {
+// RPCApplyCopyHandler handles an RPC request to apply a copy operation to a chunk on the ChunkServer.
+// It checks if the chunk exists and is not abandoned, unarchives it if compressed, writes the provided
+// data to the chunk, and updates the chunk's version. The operation uses a read lock for checking chunk
+// metadata and a write lock for updating the version to ensure thread safety.
+//
+// Args:
+//   - args: ApplyCopyArgs containing the chunk handle, data to write, and version number.
+//   - reply: AppendChunkReply to store the result of the operation (currently unused).
+//
+// Returns:
+//   - error: Returns an error if the chunk does not exist, is abandoned, unarchiving fails, or the write
+//     operation fails. Returns nil if the copy operation is successful.
+func (cs *ChunkServer) RPCApplyCopyHandler(args rpc_struct.ApplyCopyArgs, reply *rpc_struct.AppendChunkReply) error {
 	handle := args.Handle
-	err := cs.unarchiveChunks(handle)
-	if err != nil {
-		return err
-	}
 	cs.mu.RLock()
 	chInfo, ok := cs.chunks[handle]
 	cs.mu.RUnlock()
@@ -1221,15 +1233,21 @@ func (cs *Server) RPCApplyCopyHandler(args rpc_struct.ApplyCopyArgs, reply *rpc_
 		return fmt.Errorf("chunk %v does not exist or is abandoned", handle)
 	}
 
-	chInfo.Lock()
-	defer chInfo.Unlock()
+	if chInfo.isCompressed {
+		err := cs.unarchiveChunks(handle)
+		if err != nil {
+			return err
+		}
+	}
 
-	chInfo.version = args.Version
-	err = cs.writeChunk(handle, args.Data, common.MutationWrite, 0, true)
+	err := cs.writeChunk(handle, args.Data, common.MutationWrite, 0, true)
 	if err != nil {
 		return err
 	}
-	log.Printf("Server %v : Apply done", cs.ServerAddr)
+	cs.mu.Lock()
+	chInfo.version = args.Version
+	cs.mu.Unlock()
+	log.Info().Msgf("Server %v : Copy handler done", cs.ServerAddr)
 	return nil
 }
 
@@ -1237,7 +1255,111 @@ func (cs *Server) RPCApplyCopyHandler(args rpc_struct.ApplyCopyArgs, reply *rpc_
 //        HELPER FUNCTIONS
 ////////////////////////////////////////////
 
-func (cs *Server) mutate(handle common.ChunkHandle, mutation *common.Mutation) error {
+// performWrite executes a write operation on a chunk in the ChunkServer and propagates the operation to replica servers.
+// It validates the chunk's existence, state, and compression status, applies a write mutation to the local chunk, and forwards
+// the mutation to replicas. The operation is performed asynchronously, with errors collected from both local and replica operations.
+// The chunk's length is updated upon successful completion. Thread safety is ensured using mutex locks for accessing chunk metadata.
+//
+// Args:
+//   - cs: Pointer to the ChunkServer instance performing the write operation.
+//   - args: WriteChunkArgs containing the DownloadBufferId, offset, and replica addresses.
+//   - data: Byte slice containing the data to be written to the chunk.
+//
+// Returns:
+//   - error: Returns an aggregated error if the chunk does not exist, is abandoned, completed, or compressed and unarchiving fails,
+//     or if the local or replica mutation operations fail. Returns nil if the write is successful.
+func performWrite(cs *ChunkServer, args rpc_struct.WriteChunkArgs, data []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	log.Info().Msgf("[writing to chunk] %v", cs.ServerAddr)
+
+	handle := args.DownloadBufferId.Handle
+	cs.mu.RLock()
+	chInfo, ok := cs.chunks[handle]
+	cs.mu.RUnlock()
+	if !ok || chInfo.abandoned {
+		return fmt.Errorf("chunk %v on server %v is abandoned or does not exist", handle, cs.ServerAddr)
+	}
+	if chInfo.isCompressed {
+		if err := cs.unarchiveChunks(handle); err != nil {
+			return err
+		}
+	}
+	if chInfo.completed {
+		return fmt.Errorf("chunk %v on server %v is completed and cannot be written", handle, cs.ServerAddr)
+	}
+	dataSize, err := utils.BToMb(uint64(args.Offset) + uint64(len(data)))
+	if err != nil {
+		return err
+	}
+	if dataSize > common.ChunkMaxSizeInMb {
+		return fmt.Errorf("data size for chunk %v exceeds max size of %v MB", handle, common.ChunkMaxSizeInMb)
+	}
+	mutation := &common.Mutation{
+		MutationType: common.MutationWrite,
+		Data:         data,
+		Offset:       args.Offset,
+	}
+	if err := cs.doMutate(handle, mutation); err != nil {
+		return err
+	}
+
+	chInfo.Lock()
+	if _, exists := chInfo.mutations[chInfo.version]; exists {
+		chInfo.version++
+	}
+	chInfo.mutations[chInfo.version] = *mutation
+	chInfo.Unlock()
+
+	errCh := make(chan error, len(args.Replicas)+1)
+	var wg sync.WaitGroup
+
+	wg.Add(len(args.Replicas))
+	go func() {
+		utils.ForEach(args.Replicas, func(replicaAddr common.ServerAddr) {
+			defer wg.Done()
+			select {
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			default:
+				var applyMutationReply rpc_struct.ApplyMutationReply
+				err := shared.UnicastToRPCServer(
+					string(replicaAddr),
+					rpc_struct.CRPCApplyMutationHandler,
+					rpc_struct.ApplyMutationArgs{
+						DownloadBufferId: args.DownloadBufferId,
+						MutationType:     common.MutationWrite,
+						Offset:           args.Offset,
+					}, &applyMutationReply)
+				if err != nil {
+					errCh <- err
+				}
+			}
+		})
+	}()
+
+	go func() {
+		wg.Wait()
+		close(errCh)
+	}()
+
+	var errs []error
+	for e := range errCh {
+		errs = append(errs, e)
+	}
+
+	if len(errs) != 0 {
+		return errors.Join(errs...)
+	}
+
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.chunks[args.DownloadBufferId.Handle].length += common.Offset(len(data))
+	return nil
+}
+
+func (cs *ChunkServer) doMutate(handle common.ChunkHandle, mutation *common.Mutation) error {
 	var shouldLock bool
 
 	if mutation.MutationType == common.MutationAppend || mutation.MutationType == common.MutationWrite {
@@ -1257,66 +1379,109 @@ func (cs *Server) mutate(handle common.ChunkHandle, mutation *common.Mutation) e
 	return err
 }
 
-func (cs *Server) writeChunk(handle common.ChunkHandle, data []byte, mutationType common.MutationType, offset common.Offset, lock bool) error {
-
+// writeChunk writes data to a chunk file at the specified offset with the given mutation type.
+// It updates the chunk's metadata, such as length and last modified time, and computes a checksum
+// for the file content if applicable. The function supports both write and append operations,
+// and optionally locks the chunk metadata for thread safety. If the write exceeds the maximum chunk
+// size, an error is returned. The chunk is marked as completed if its size reaches the maximum limit.
+//
+// Args:
+//   - cs: Pointer to the ChunkServer instance performing the write operation.
+//   - handle: ChunkHandle identifying the chunk to write to.
+//   - data: Byte slice containing the data to write.
+//   - mutationType: MutationType specifying the type of write operation (e.g., MutationWrite or MutationAppend).
+//   - offset: Offset indicating the starting position in the chunk file for the write.
+//   - lock: Boolean indicating whether to lock the chunk metadata during the operation.
+//
+// Returns:
+//   - error: Returns an error if the data size exceeds the maximum chunk size, the file cannot be opened,
+//     written to, or read for checksum calculation, or if file closing fails. Returns nil if the write is successful.
+func (cs *ChunkServer) writeChunk(handle common.ChunkHandle, data []byte, mutationType common.MutationType, offset common.Offset, lock bool) error {
 	cs.mu.RLock()
-	chInfo := cs.chunks[handle]
+	chInfo, ok := cs.chunks[handle]
 	cs.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("chunk %v on server %v does not exist", handle, cs.ServerAddr)
+	}
 
+	if mutationType != common.MutationWrite && mutationType != common.MutationAppend {
+		return fmt.Errorf("invalid mutation type for chunk %v: %v", handle, mutationType)
+	}
+
+	chInfo.Lock()
 	newLen := offset + common.Offset(len(data))
 	if newLen > chInfo.length {
 		chInfo.length = newLen
 	}
-
 	if newLen > common.ChunkMaxSizeInByte {
-		return fmt.Errorf("data size is larger than maximum allowed per chunk")
+		chInfo.Unlock()
+		return fmt.Errorf("data size for chunk %v on server %v exceeds max size %v bytes", handle, cs.ServerAddr, common.ChunkMaxSizeInByte)
 	}
+	chInfo.Unlock()
 
 	if lock {
 		cs.mu.Lock()
 		defer cs.mu.Unlock()
 	}
+
 	fileFlag := os.O_CREATE
 	if mutationType == common.MutationAppend {
 		fileFlag |= os.O_APPEND
 	} else {
 		fileFlag |= os.O_RDWR
 	}
+
 	fs, err := cs.rootDir.GetFile(fmt.Sprintf(common.ChunkFileNameFormat, handle), fileFlag, 0644)
 	if err != nil {
 		return err
 	}
 	defer func(fs *os.File) {
-		err := fs.Close()
-		if err != nil {
-			log.Err(err).Stack()
+		if err := fs.Close(); err != nil {
+			log.Err(err).Msgf("failed to close file for chunk %v", handle)
 		}
 	}(fs)
+
 	n, err := fs.WriteAt(data, int64(offset))
 	if err != nil {
-		log.Info().Msgf("error occurred while writing from %v from offset %v", chInfo, offset)
+		log.Err(err).Msgf("failed to write to chunk %v at offset %v", handle, offset)
 		return err
 	}
-	log.Printf("Wrote %d from %v from offset %v", n, chInfo, offset)
+	log.Debug().Msgf("Wrote %d bytes to chunk %v at offset %v", n, handle, offset)
+
+	chInfo.Lock()
+	defer chInfo.Unlock()
 	chInfo.lastModified = time.Now()
-	content, err := io.ReadAll(fs)
-	if err != nil {
-		log.Info().Msgf("error occurred while reading file for checksum calculation [offset : %v] [chinfo : %v ]", chInfo, offset)
-		log.Err(err).Send()
-		return err
-	}
 	if newLen >= common.ChunkMaxSizeInByte {
 		chInfo.completed = true
 	}
-	if len(content) != 0 {
-		chInfo.checksum = common.Checksum(utils.ComputeChecksum(string(content)))
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, fs); err != nil {
+		log.Err(err).Msgf("failed to read chunk %v for checksum", handle)
+		return err
 	}
+	chInfo.checksum = common.Checksum(hasher.Sum(nil))
 	return nil
 }
 
-func (cs *Server) readChunk(handle common.ChunkHandle, offset common.Offset, data []byte) (int, error) {
+// readChunk reads data from a chunk file at the specified offset into the provided data buffer.
+// It opens the chunk file in read-only mode, reads the requested data starting at the given offset,
+// and logs the operation. The file is closed after the operation, and any errors during reading or
+// closing are logged and returned.
+//
+// Args:
+//   - handle: ChunkHandle identifying the chunk to read from.
+//   - offset: Offset indicating the starting position in the chunk file to read.
+//   - data: Byte slice to store the read data.
+//
+// Returns:
+//   - int: Number of bytes read from the chunk file.
+//   - error: Returns an error if the file cannot be opened, read, or closed. Returns nil if the read
+//     is successful.
+func (cs *ChunkServer) readChunk(handle common.ChunkHandle, offset common.Offset, data []byte) (int, error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
 	filename := fmt.Sprintf(common.ChunkFileNameFormat, handle)
-
 	f, err := cs.rootDir.GetFile(filename, os.O_RDONLY, common.FileMode)
 	if err != nil {
 		log.Err(err).Stack().Send()
@@ -1325,10 +1490,10 @@ func (cs *Server) readChunk(handle common.ChunkHandle, offset common.Offset, dat
 	defer func(fs *os.File) {
 		err := fs.Close()
 		if err != nil {
-			log.Err(err).Stack()
+			log.Err(err).Stack().Send()
 		}
 	}(f)
-	log.Printf(
+	log.Info().Msgf(
 		"Server %v reading data from offset %v for chunk handle [%v] - %s",
 		cs.ServerAddr, offset, handle, filename)
 	n, err := f.ReadAt(data, int64(offset))
@@ -1410,5 +1575,6 @@ func extractAverageRTT(input string) (float64, error) {
 // isValidAddr checks if the address is a valid IP or hostname (basic validation).
 func isValidAddr(addr string) bool {
 	// Basic validation: non-empty and contains only allowed characters
-	return len(addr) > 0 && regexp.MustCompile(`^[a-zA-Z0-9.-]+$`).MatchString(addr)
+	return len(addr) > 0 && (regexp.MustCompile(`^[a-zA-Z0-9.-]+$`).MatchString(addr) ||
+		regexp.MustCompile(`^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?):([0-9]{1,5})$`).MatchString(addr))
 }
